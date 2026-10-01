@@ -1372,6 +1372,167 @@ def prompt_video_choice(videos):
 
 
 # =========================================================
+# 12b. SELECTOR GRAFICO (miniaturas, clic para elegir)
+# =========================================================
+def pick_video_gui(checkpoint=None, videos=None):
+    """
+    Ventana con una miniatura por video (el primer frame de cada uno) para
+    elegir con un clic, en vez de escribir rutas o numeros en la consola.
+    Pensado para que un doctor no tenga que tocar la terminal.
+
+    - Si 'videos' ya viene dado (porque se paso --library), se muestran
+      directo, con un boton para cambiar de carpeta si hace falta.
+    - Si no viene nada, aparecen botones para elegir una carpeta o un solo
+      archivo.
+    - Si 'checkpoint' no viene dado, tambien se puede elegir el modelo
+      (.pth) desde la misma ventana.
+
+    Devuelve (checkpoint_elegido, lista_de_videos, indice_inicial) o
+    (None, None, 0) si se cerro sin elegir nada, o si falta Pillow/tkinter
+    (en ese caso avisa por consola y quien llama debe usar el modo texto).
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog, messagebox
+        from PIL import Image, ImageTk
+    except Exception as e:
+        print(f"Aviso: selector grafico no disponible ({e}). "
+              f"Instala Pillow ('pip install Pillow') o usa --library con --no-display para el modo texto.")
+        return None, None, 0
+
+    THUMB_W, THUMB_H = 220, 140
+    COLS = 4
+
+    root = tk.Tk()
+    root.title("UACANet - elegir video")
+    root.configure(bg="#1e1e1e")
+    root.geometry("980x680")
+
+    state = {"checkpoint": checkpoint, "videos": list(videos) if videos else [],
+            "start_idx": 0, "confirmed": False}
+    thumb_refs = []   # hay que mantener una referencia o Tk las "recoge" y la imagen se borra
+
+    top = tk.Frame(root, bg="#1e1e1e")
+    top.pack(fill="x", padx=12, pady=10)
+
+    ckpt_label = tk.Label(top, text="", bg="#1e1e1e", fg="#dddddd", anchor="w",
+                          font=("Segoe UI", 10))
+    ckpt_label.pack(side="left", fill="x", expand=True)
+
+    def refresh_ckpt_label():
+        if state["checkpoint"]:
+            ckpt_label.config(text=f"Modelo: {os.path.basename(state['checkpoint'])}")
+        else:
+            ckpt_label.config(text="Modelo: (sin elegir)")
+
+    def choose_checkpoint():
+        path = filedialog.askopenfilename(
+            title="Selecciona el modelo entrenado",
+            filetypes=[("Checkpoint PyTorch", "*.pth"), ("Todos los archivos", "*.*")])
+        if path:
+            state["checkpoint"] = path
+            refresh_ckpt_label()
+
+    tk.Button(top, text="Elegir modelo (.pth)...", command=choose_checkpoint).pack(side="right")
+    refresh_ckpt_label()
+
+    status = tk.Label(root, text="", bg="#1e1e1e", fg="#9fd3ff", font=("Segoe UI", 9))
+    status.pack(fill="x", padx=12)
+
+    # --- grilla de miniaturas, con scroll ---
+    container = tk.Frame(root, bg="#1e1e1e")
+    container.pack(fill="both", expand=True, padx=12, pady=10)
+    gcanvas = tk.Canvas(container, bg="#1e1e1e", highlightthickness=0)
+    scrollbar = tk.Scrollbar(container, orient="vertical", command=gcanvas.yview)
+    grid_frame = tk.Frame(gcanvas, bg="#1e1e1e")
+    grid_frame.bind("<Configure>", lambda e: gcanvas.configure(scrollregion=gcanvas.bbox("all")))
+    gcanvas.create_window((0, 0), window=grid_frame, anchor="nw")
+    gcanvas.configure(yscrollcommand=scrollbar.set)
+    gcanvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    def _on_wheel(event):
+        gcanvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+    gcanvas.bind_all("<MouseWheel>", _on_wheel)
+
+    def make_thumbnail(path):
+        cap = cv2.VideoCapture(path)
+        ok, frame = cap.read()
+        cap.release()
+        canvas_img = np.full((THUMB_H, THUMB_W, 3), 35, dtype=np.uint8)
+        if ok:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            fh, fw = frame.shape[:2]
+            scale = min(THUMB_W / fw, THUMB_H / fh)
+            nw, nh = max(1, int(fw * scale)), max(1, int(fh * scale))
+            frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+            x0, y0 = (THUMB_W - nw) // 2, (THUMB_H - nh) // 2
+            canvas_img[y0:y0 + nh, x0:x0 + nw] = frame
+        return ImageTk.PhotoImage(Image.fromarray(canvas_img))
+
+    def on_pick(idx):
+        state["start_idx"] = idx
+        state["confirmed"] = True
+        root.destroy()
+
+    def populate():
+        for w in grid_frame.winfo_children():
+            w.destroy()
+        thumb_refs.clear()
+        vids = state["videos"]
+        if not vids:
+            tk.Label(grid_frame, text="Elige una carpeta o un video para empezar.",
+                    bg="#1e1e1e", fg="#999999", font=("Segoe UI", 11)).grid(row=0, column=0, padx=20, pady=20)
+            return
+        for i, path in enumerate(vids):
+            status.config(text=f"Generando miniatura {i + 1}/{len(vids)}...")
+            root.update_idletasks()
+            thumb = make_thumbnail(path)
+            thumb_refs.append(thumb)
+            cell = tk.Frame(grid_frame, bg="#1e1e1e")
+            cell.grid(row=i // COLS, column=i % COLS, padx=10, pady=10)
+            btn = tk.Button(cell, image=thumb, command=lambda i=i: on_pick(i),
+                            bd=2, relief="groove", cursor="hand2")
+            btn.pack()
+            name = os.path.basename(path)
+            if len(name) > 30:
+                name = name[:27] + "..."
+            tk.Label(cell, text=name, bg="#1e1e1e", fg="#dddddd", font=("Segoe UI", 9)).pack()
+        status.config(text=f"{len(vids)} video(s) — clic en uno para abrirlo.")
+
+    def choose_folder():
+        folder = filedialog.askdirectory(title="Selecciona la carpeta con los videos")
+        if not folder:
+            return
+        found = list_videos_in_dir(folder)
+        if not found:
+            messagebox.showwarning("Sin videos", "No se encontraron videos (.avi/.mp4/.mov/...) en esa carpeta.")
+            return
+        state["videos"] = found
+        populate()
+
+    def choose_single_file():
+        path = filedialog.askopenfilename(
+            title="Selecciona un video",
+            filetypes=[("Videos", "*.avi *.mp4 *.mov *.mkv *.mpg *.mpeg *.wmv"), ("Todos", "*.*")])
+        if path:
+            state["videos"] = [path]
+            populate()
+
+    browse = tk.Frame(root, bg="#1e1e1e")
+    browse.pack(fill="x", padx=12, pady=(0, 10))
+    tk.Button(browse, text="Elegir carpeta de videos...", command=choose_folder).pack(side="left")
+    tk.Button(browse, text="Elegir un solo video...", command=choose_single_file).pack(side="left", padx=10)
+
+    populate()
+    root.mainloop()
+
+    if not state["confirmed"] or not state["videos"]:
+        return None, None, 0
+    return state["checkpoint"], state["videos"], state["start_idx"]
+
+
+# =========================================================
 # 13. CLI
 # =========================================================
 if __name__ == "__main__":
@@ -1381,7 +1542,12 @@ if __name__ == "__main__":
     parser.add_argument("--library", default=None,
                         help="Carpeta con varios videos: al iniciar eliges cual ver, y dentro del visor "
                              "usas n/p (o los botones <VID / VID>) para cambiar de video.")
-    parser.add_argument("--checkpoint", required=True, help="Ruta a best_model.pth / last_model.pth")
+    parser.add_argument("--checkpoint", default=None,
+                        help="Ruta a best_model.pth / last_model.pth. Si se omite y se usa el selector "
+                             "grafico, se puede elegir ahi mismo.")
+    parser.add_argument("--no-picker", action="store_true",
+                        help="No abrir el selector grafico aunque falten --source/--library; "
+                             "usar el modo de consola (numero + Enter) en su lugar.")
     parser.add_argument("--output", default=None, help="Ruta .mp4 para guardar el resultado (opcional)")
     parser.add_argument("--history-dir", default=None,
                         help="Carpeta donde guardar el historial de hallazgos (imagenes + CSV). "
@@ -1404,9 +1570,6 @@ if __name__ == "__main__":
     parser.add_argument("--interactive", action="store_true")
     args = parser.parse_args()
 
-    if not args.source and not args.library:
-        parser.error("Indica --source (un video o camara) o --library (una carpeta con varios videos).")
-
     videos = None
     if args.library:
         videos = list_videos_in_dir(args.library)
@@ -1414,10 +1577,38 @@ if __name__ == "__main__":
             raise SystemExit(f"No se encontraron videos en {args.library}")
         start_idx = 0
         if not args.no_display and len(videos) > 1:
-            start_idx = prompt_video_choice(videos)
+            if args.no_picker:
+                start_idx = prompt_video_choice(videos)
+            else:
+                # el selector grafico ya recibe la carpeta cargada: solo hay
+                # que elegir cual abrir (o cambiar de carpeta ahi mismo)
+                ckpt_gui, videos_gui, idx_gui = pick_video_gui(args.checkpoint, videos)
+                if videos_gui:
+                    videos = videos_gui
+                    start_idx = idx_gui
+                    if ckpt_gui and not args.checkpoint:
+                        args.checkpoint = ckpt_gui
+                else:
+                    raise SystemExit("No se eligio ningun video; se cierra el programa.")
         chosen_source = videos[start_idx]
-    else:
+    elif args.source:
         chosen_source = args.source
+    else:
+        # Ni --source ni --library: se abre el selector grafico desde cero
+        # (si --no-display o falta Pillow/tkinter, se cae al modo consola).
+        if args.no_display or args.no_picker:
+            parser.error("Indica --source (un video o camara) o --library (una carpeta con varios videos). "
+                         "El selector grafico no aplica con --no-display/--no-picker.")
+        ckpt_gui, videos_gui, idx_gui = pick_video_gui(args.checkpoint)
+        if not videos_gui:
+            raise SystemExit("No se eligio ningun video; se cierra el programa.")
+        if ckpt_gui and not args.checkpoint:
+            args.checkpoint = ckpt_gui
+        videos = videos_gui if len(videos_gui) > 1 else None
+        chosen_source = videos_gui[idx_gui]
+
+    if not args.checkpoint:
+        parser.error("Falta el modelo: pasa --checkpoint o eligelo en el selector grafico.")
 
     def _get_fps(src):
         cap_probe = cv2.VideoCapture(int(src) if str(src).isdigit() else src)
