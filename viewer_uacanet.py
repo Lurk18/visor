@@ -1,75 +1,63 @@
 """
-Visor en tiempo real — UACANet-v2 (colonoscopia)  [version clinica, con historial de hallazgos]
-=================================================================================================
+Visor en tiempo real — UACANet-v2 (colonoscopia)  [multi-video + anotacion manual]
+====================================================================================
 
 Muestra en paralelo:
-    [ video original ]   [ overlay de segmentacion ]   [ panel lateral: estado + historial ]
+    [ video original ]   [ overlay de segmentacion ]   [ panel: estado + historial ]
 
-Cada vez que el modelo detecta un polipo nuevo (una region que no estaba en el
-frame anterior), se guarda automaticamente una miniatura de ese momento (con
-el numero de frame y el tiempo) en el historial del panel derecho. El panel
-se puede desplazar con la rueda del mouse y hacer clic en cualquier miniatura
-salta directo a ese frame. Al cerrar el programa, el historial completo se
-guarda en disco (una imagen por hallazgo + un CSV) para que el doctor lo
-pueda revisar despues sin tener que volver a correr el video.
+Novedades de esta version:
+    - Se puede cargar una CARPETA con varios videos (--library) y elegir cual ver;
+      dentro del visor, con 'n'/'p' (o los botones <VID / VID>) se cambia de video
+      sin cerrar el programa.
+    - Si un video ya tiene un historial guardado de una sesion anterior (carpeta
+      "<video>_hallazgos"), se carga automaticamente al abrirlo: tanto los hallazgos
+      automaticos como las marcas manuales reaparecen.
+    - Modo de anotacion manual ('e' o boton ANOTAR): con el mouse, clic izquierdo y
+      arrastrar dibuja una marca (pincel) sobre el panel de segmentacion; clic derecho
+      borra. 'g' (o boton GUARDAR) guarda esa marca en el historial, igual que un
+      hallazgo automatico pero etiquetado como manual. Util para que el doctor marque
+      el polipo el mismo, sin depender del modelo.
 
-No se muestran numeros de probabilidad, conteo de pixeles, tiempos de
-inferencia ni IoU entre frames: el panel solo indica el estado del video
-(frame, tiempo, pausa/reproduccion, umbral, modo de dibujo) y el historial de
-hallazgos. Es un registro orientativo generado automaticamente, no un
-diagnostico ni un reemplazo de la revision medica completa del video.
+Controles mientras corre en tu PC:
+    ESPACIO / click PLAY-PAUSA : pausar o reanudar
+    STOP / 's'                 : volver al frame 0
+    <1  o flecha izq / 'a'     : retroceder 1 frame
+    <<10 o 'z'                 : retroceder 10 frames
+    1>  o flecha der / 'd'     : avanzar 1 frame
+    10>> o 'x'                 : avanzar 10 frames
+    -THR / +THR  o '-' / '+'   : bajar/subir el umbral de binarizacion
+    slider "Umbral x100"       : mismo umbral, de forma continua
+    slider "Posicion"          : arrastrar para saltar a cualquier frame
+    ANALISIS / 'v'             : prender/apagar la inferencia del modelo
+    MODO / 'm'                 : alternar entre mascara rellena y solo bbox
+    ANOTAR / 'e'                : prender/apagar el modo de marca manual (pausa el video)
+       clic izq + arrastrar en el panel de segmentacion : marcar (pincel amarillo)
+       clic der + arrastrar                              : borrar
+       '[' / ']'                                          : pincel mas chico / grande
+       'c'                                                 : borrar la marca manual del frame actual
+    GUARDAR / 'g'               : guardar la marca manual actual en el historial
+    <VID / 'p'                  : video anterior de la lista (si hay varios)
+    VID> / 'n'                  : video siguiente de la lista (si hay varios)
+    rueda del mouse sobre el panel : desplaza el historial de hallazgos
+    clic en una miniatura           : salta a ese frame
+    SALIR / 'q' / ESC           : cerrar (guarda el historial del video actual)
 
-Controles (raton o teclado) mientras corre en tu PC:
-    ESPACIO / click en PLAY-PAUSA : pausar o reanudar
-    STOP / 's'                    : detener y volver al frame 0
-    <1  o  flecha izquierda / 'a' : retroceder 1 frame
-    <<10 o 'z'                    : retroceder 10 frames
-    1>  o  flecha derecha / 'd'   : avanzar 1 frame
-    10>> o 'x'                    : avanzar 10 frames
-    -THR / +THR  o  '-' / '+'     : bajar/subir el umbral de binarizacion
-    slider "Umbral x100"          : mismo umbral, pero de forma continua
-    slider "Posicion"             : arrastrar para saltar a cualquier frame
-    ANALISIS / 'v'                : prender/apagar la inferencia del modelo
-                                     (apagala para navegar el video a velocidad
-                                     normal; el modelo es el cuello de botella,
-                                     no la lectura del video)
-    MODO / 'm'                    : alternar entre mascara rellena y solo bbox
-    rueda del mouse sobre el       : desplazar el historial de hallazgos
-    panel lateral
-    clic en una miniatura del      : saltar a ese frame
-    historial
-
-    SALIR / 'q' / ESC             : cerrar
-
-El retroceso funciona sobre un buffer en memoria de los ultimos N frames ya
-procesados (--cache-frames), asi no hay que re-decodificar el .avi hacia atras,
-que es justo donde estos archivos MJPEG se rompen. El slider de posicion sigue
-la misma logica: si el frame pedido ya esta en el buffer salta directo: si esta
-mas adelante, avanza saltando frames sin decodificarlos (cap.grab, barato); si
-esta mas atras del buffer, reabre el video y vuelve a posicionarse leyendo
-secuencialmente desde el inicio — mas lento en saltos grandes hacia atras, pero
-evita el salto por indice (CAP_PROP_POS_FRAMES) que corrompe estos archivos.
-
-Sobre el historial: se registra un hallazgo nuevo cada vez que aparece una
-region detectada donde el frame inmediatamente anterior no tenia ninguna (asi
-no se llena de entradas repetidas mientras el mismo polipo sigue en pantalla).
-Cada hallazgo guarda: numero de frame, tiempo (mm:ss) y una miniatura recortada
-alrededor de la zona marcada. Al salir (tecla 'q'/ESC o boton SALIR), todo esto
-se escribe a la carpeta indicada en --history-dir (por defecto, una carpeta
-"<nombre_del_video>_hallazgos" junto al video): una imagen PNG por hallazgo
-mas un archivo hallazgos.csv con frame, tiempo y nombre de imagen.
+El retroceso usa un buffer en memoria de los ultimos N frames (--cache-frames) en vez
+de re-decodificar el .avi hacia atras, que es justo donde los archivos MJPEG se rompen.
+El slider de posicion sigue la misma logica: si el frame pedido ya esta en el buffer
+salta directo; si esta mas adelante, avanza sin decodificar (cap.grab, barato); si esta
+mas atras del buffer, reabre el video y vuelve a leer secuencialmente desde el inicio.
 
 Uso tipico:
 
-    # Local, con controles:
-    python viewer_uacanet.py --source ruta\\al\\video.mp4 --checkpoint best_model.pth
+    # Un solo video, con controles:
+    python viewer_uacanet.py --source video.avi --checkpoint best_model.pth
 
-    # Local, empezando en un minuto concreto:
-    python viewer_uacanet.py --source video.avi --checkpoint best_model.pth --start-time 7:16
+    # Una carpeta con varios videos: elige cual ver, navega con n/p adentro:
+    python viewer_uacanet.py --library C:\\videos_paciente --checkpoint best_model.pth
 
-    # Eligiendo donde guardar el historial de hallazgos:
-    python viewer_uacanet.py --source video.mp4 --checkpoint best_model.pth \
-        --history-dir C:\\revisiones\\paciente_042
+    # Camara en vivo (sin navegacion entre videos, un solo "video" = la camara):
+    python viewer_uacanet.py --source 0 --checkpoint best_model.pth
 
     # Kaggle / sin GUI, guardando a archivo:
     python viewer_uacanet.py --source video.mp4 --checkpoint best_model.pth \
@@ -358,10 +346,8 @@ def segment_frame(model, frame_bgr, device, size=352, use_autocast=True):
 def make_overlay(frame_bgr, mask_prob, threshold=0.5, color=(0, 0, 255), alpha=0.45,
                  mode="mask", min_comp_frac=2e-4):
     """
-    mode="mask": relleno rojo translucido + contorno verde (como antes).
+    mode="mask": relleno rojo translucido + contorno verde.
     mode="bbox": sin relleno; solo el rectangulo de cada region detectada.
-                 Util cuando el relleno tapa el detalle de la mucosa o cuando
-                 solo te interesa la ubicacion/tamano, no la forma exacta.
     """
     binary_mask = (mask_prob > threshold).astype(np.uint8)
 
@@ -388,15 +374,9 @@ def make_overlay(frame_bgr, mask_prob, threshold=0.5, color=(0, 0, 255), alpha=0
 
 
 # =========================================================
-# 5. DETECCION DE REGIONES (solo para saber SI hay polipo, no metricas)
+# 5. DETECCION DE REGIONES (solo para saber SI hay polipo)
 # =========================================================
 def analyze_regions(binary, min_comp_frac=2e-4):
-    """
-    Reduce la mascara binaria a lo minimo que necesitamos para el historial de
-    hallazgos: cuantas regiones hay y donde esta la mas grande. No calcula
-    probabilidad, pixeles, tiempos de inferencia ni IoU: esto no son metricas
-    de precision, son solo datos de ubicacion para recortar la miniatura.
-    """
     total = binary.size
     n_lab, _, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
     min_area = max(20, int(min_comp_frac * total))
@@ -412,8 +392,6 @@ def analyze_regions(binary, min_comp_frac=2e-4):
 
 
 def make_finding_thumbnail(overlay_bgr, bbox, thumb_w=150, thumb_h=100, margin_frac=0.6):
-    """Recorta la zona marcada (con margen) de la imagen ya con el overlay
-    dibujado, y la reduce a un tamano fijo para el historial."""
     h, w = overlay_bgr.shape[:2]
     if bbox is None:
         crop = overlay_bgr
@@ -430,7 +408,7 @@ def make_finding_thumbnail(overlay_bgr, bbox, thumb_w=150, thumb_h=100, margin_f
 
 
 # =========================================================
-# 6. GUARDAR HISTORIAL EN DISCO
+# 6. GUARDAR / CARGAR HISTORIAL (automatico + manual)
 # =========================================================
 def default_history_dir(source):
     if isinstance(source, str) and os.path.exists(source):
@@ -442,19 +420,59 @@ def default_history_dir(source):
 
 def save_history(findings, out_dir):
     if not findings:
-        print("No se registraron hallazgos; no se genera historial en disco.")
         return
     os.makedirs(out_dir, exist_ok=True)
     csv_path = os.path.join(out_dir, "hallazgos.csv")
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["numero_hallazgo", "frame", "tiempo", "archivo_imagen"])
+        writer.writerow(["numero_hallazgo", "frame", "tiempo", "tipo", "archivo_imagen", "archivo_mascara"])
         for i, item in enumerate(findings, start=1):
             img_name = f"hallazgo_{i:03d}_frame{item['idx']:06d}.png"
             cv2.imwrite(os.path.join(out_dir, img_name), item["thumb"])
-            writer.writerow([i, item["idx"], seconds_to_mmss(item["time_s"]), img_name])
-    print(f"\nHistorial guardado: {len(findings)} hallazgo(s) en '{out_dir}' "
-          f"(imagenes + hallazgos.csv) para revision posterior.")
+            mask_name = ""
+            if item.get("mask") is not None:
+                mask_name = f"mascara_frame{item['idx']:06d}.png"
+                cv2.imwrite(os.path.join(out_dir, mask_name), item["mask"])
+            writer.writerow([i, item["idx"], seconds_to_mmss(item["time_s"]),
+                             item.get("tipo", "automatico"), img_name, mask_name])
+    print(f"\nHistorial guardado: {len(findings)} hallazgo(s) en '{out_dir}'.")
+
+
+def load_history(history_dir, fps):
+    """Lee un historial guardado en una sesion anterior (si existe) y lo
+    reconstruye: findings (para el panel) + manual_annotations (para poder
+    seguir editando las marcas manuales sobre el video)."""
+    findings = []
+    manual_annotations = {}
+    csv_path = os.path.join(history_dir, "hallazgos.csv")
+    if not os.path.exists(csv_path):
+        return findings, manual_annotations
+    try:
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                idx = int(row["frame"])
+                img_name = row.get("archivo_imagen", "")
+                thumb_path = os.path.join(history_dir, img_name) if img_name else None
+                if thumb_path and os.path.exists(thumb_path):
+                    thumb = cv2.imread(thumb_path)
+                else:
+                    thumb = np.zeros((100, 150, 3), dtype=np.uint8)
+                tipo = row.get("tipo") or "automatico"
+                item = {"idx": idx, "time_s": idx / fps if fps else 0.0, "thumb": thumb, "tipo": tipo}
+                mask_name = row.get("archivo_mascara", "")
+                if mask_name:
+                    mpath = os.path.join(history_dir, mask_name)
+                    if os.path.exists(mpath):
+                        m = cv2.imread(mpath, cv2.IMREAD_GRAYSCALE)
+                        if m is not None:
+                            item["mask"] = m
+                            manual_annotations[idx] = m
+                findings.append(item)
+    except Exception as e:
+        print(f"Aviso: no se pudo leer el historial previo ({e}); se empieza vacio.")
+        return [], {}
+    return findings, manual_annotations
 
 
 # =========================================================
@@ -483,10 +501,10 @@ def paste(dst, src, x, y):
 
 
 # =========================================================
-# 8. PANEL LATERAL: ESTADO (arriba) + HISTORIAL DE HALLAZGOS (abajo, con scroll)
+# 8. PANEL LATERAL: ESTADO (arriba) + HISTORIAL (abajo, con scroll)
 # =========================================================
-PANEL_W = 300          # ancho por defecto del panel lateral
-HEADER_H = 150         # alto de la seccion de estado, el resto es el historial
+PANEL_W = 300
+HEADER_H = 205          # alto de la seccion de estado; el resto es el historial
 THUMB_W, THUMB_H = 150, 100
 ITEM_H = THUMB_H + 34
 BAR_H = 64
@@ -496,33 +514,45 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 BUTTONS_SPEC = [
     ("STOP", "stop"), ("<<10", "back10"), ("<1", "back1"), ("PLAY/PAUSA", "toggle"),
     ("1>", "fwd1"), ("10>>", "fwd10"), ("-THR", "thr_down"), ("+THR", "thr_up"),
-    ("ANALISIS", "toggle_analysis"), ("MODO", "toggle_mode"), ("SALIR", "quit"),
+    ("ANALISIS", "toggle_analysis"), ("MODO", "toggle_mode"),
+    ("ANOTAR", "toggle_manual"), ("GUARDAR", "save_manual"),
+    ("<VID", "prev_video"), ("VID>", "next_video"), ("SALIR", "quit"),
 ]
 
 
 def draw_status_header(width, height, frame_idx, t_s, paused, threshold, render_mode,
-                       analysis_on, n_findings):
+                       analysis_on, n_findings, brush_mode=False, brush_radius=15, video_label=""):
     header = np.full((height, width, 3), 25, dtype=np.uint8)
     margin = 14
-    fs = 0.5
-    y = 26
-    cv2.putText(header, "ESTADO", (margin, y), FONT, 0.65, (0, 220, 255), 2, cv2.LINE_AA)
-    y += 26
+    fs = 0.48
+    y = 20
+    if video_label:
+        cv2.putText(header, video_label, (margin, y), FONT, 0.42, (150, 200, 255), 1, cv2.LINE_AA)
+        y += 20
+    cv2.putText(header, "ESTADO", (margin, y), FONT, 0.6, (0, 220, 255), 2, cv2.LINE_AA)
+    y += 24
     cv2.putText(header, f"Frame {frame_idx}   t={seconds_to_mmss(t_s)}", (margin, y),
                 FONT, fs, (225, 225, 225), 1, cv2.LINE_AA)
-    y += 22
+    y += 20
     state_txt = "PAUSA" if paused else "REPRODUCIENDO"
     state_col = (0, 200, 255) if paused else (120, 255, 120)
     cv2.putText(header, f"Estado: {state_txt}", (margin, y), FONT, fs, state_col, 1, cv2.LINE_AA)
-    y += 22
+    y += 20
     modo_txt = "Mascara" if render_mode == "mask" else "BBox"
     cv2.putText(header, f"Umbral: {threshold:.2f}   Modo: {modo_txt}", (margin, y),
                 FONT, fs, (225, 225, 225), 1, cv2.LINE_AA)
-    y += 22
+    y += 20
     if not analysis_on:
         cv2.putText(header, "Analisis: DESACTIVADO", (margin, y), FONT, fs,
                     (0, 160, 255), 1, cv2.LINE_AA)
-        y += 22
+        y += 20
+    if brush_mode:
+        cv2.putText(header, f"ANOTACION MANUAL (pincel {brush_radius}px)", (margin, y),
+                    FONT, fs, (0, 215, 255), 1, cv2.LINE_AA)
+        y += 18
+        cv2.putText(header, "clic=marcar der=borrar [ ]=pincel g=guardar", (margin, y),
+                    FONT, 0.36, (200, 200, 200), 1, cv2.LINE_AA)
+        y += 18
     cv2.putText(header, f"Hallazgos registrados: {n_findings}", (margin, y), FONT, fs,
                 (255, 210, 120), 1, cv2.LINE_AA)
     cv2.line(header, (0, height - 1), (width, height - 1), (80, 80, 80), 1)
@@ -530,12 +560,6 @@ def draw_status_header(width, height, frame_idx, t_s, paused, threshold, render_
 
 
 def draw_history_section(width, height, findings, scroll_offset):
-    """
-    Dibuja la lista de miniaturas de hallazgos, desplazada por scroll_offset
-    (en pixeles). Devuelve la seccion dibujada, la lista de rectangulos
-    clicables (y0, y1, frame_idx) en coordenadas de esta seccion, y el alto
-    total del contenido (para poder limitar el scroll).
-    """
     section = np.full((height, width, 3), 20, dtype=np.uint8)
     margin = 14
     cv2.putText(section, "HISTORIAL DE HALLAZGOS", (margin, 24), FONT, 0.52,
@@ -544,8 +568,8 @@ def draw_history_section(width, height, findings, scroll_offset):
     list_top = 42
 
     if not findings:
-        cv2.putText(section, "Aun no se detecta ningun polipo.", (margin, list_top + 20),
-                    FONT, 0.45, (150, 150, 150), 1, cv2.LINE_AA)
+        cv2.putText(section, "Aun no hay hallazgos (automaticos ni manuales).", (margin, list_top + 20),
+                    FONT, 0.42, (150, 150, 150), 1, cv2.LINE_AA)
         return section, [], 0
 
     total_content_h = len(findings) * ITEM_H
@@ -554,18 +578,19 @@ def draw_history_section(width, height, findings, scroll_offset):
     for item in findings:
         if y + ITEM_H >= list_top and y <= height:
             paste(section, item["thumb"], margin, int(y))
-            label = f"#{item['idx']}  t={seconds_to_mmss(item['time_s'])}"
+            tag = "[M]" if item.get("tipo") == "manual" else "[A]"
+            label = f"{tag} #{item['idx']}  t={seconds_to_mmss(item['time_s'])}"
+            tag_col = (0, 215, 255) if item.get("tipo") == "manual" else (120, 255, 120)
             ly = int(y) + THUMB_H + 18
             if list_top <= ly <= height:
-                cv2.putText(section, label, (margin, ly), FONT, 0.42,
-                            (220, 220, 220), 1, cv2.LINE_AA)
+                cv2.putText(section, label, (margin, ly), FONT, 0.42, tag_col, 1, cv2.LINE_AA)
         rects.append((int(y), int(y) + ITEM_H, item["idx"]))
         y += ITEM_H
 
     return section, rects, total_content_h
 
 
-def draw_button_bar(width, paused, analysis_on=True, render_mode="mask"):
+def draw_button_bar(width, paused, analysis_on=True, render_mode="mask", brush_mode=False):
     bar = np.full((BAR_H, width, 3), 35, dtype=np.uint8)
     n = len(BUTTONS_SPEC)
     bw = width // n
@@ -587,15 +612,20 @@ def draw_button_bar(width, paused, analysis_on=True, render_mode="mask"):
         elif action == "toggle_mode":
             text = "MODO: MASCARA" if render_mode == "mask" else "MODO: BBOX"
             color = (255, 210, 120)
+        elif action == "toggle_manual":
+            text = "ANOTAR: ON" if brush_mode else "ANOTAR: OFF"
+            color = (0, 215, 255) if brush_mode else (235, 235, 235)
+        elif action == "save_manual":
+            color = (0, 215, 255)
         elif action == "quit":
             color = (110, 110, 255)
 
         avail = (x1 - x0 - 4) - 10
-        fs = 0.75
+        fs = 0.7
         (tw, th), _ = cv2.getTextSize(text, FONT, fs, 2)
         if tw > avail:
             fs *= avail / tw
-            fs = max(0.38, fs)
+            fs = max(0.34, fs)
             (tw, th), _ = cv2.getTextSize(text, FONT, fs, 2)
         cv2.putText(bar, text, (x0 + 4 + max(0, ((x1 - x0 - 4) - tw) // 2), (BAR_H + th) // 2),
                     FONT, fs, color, 2, cv2.LINE_AA)
@@ -619,11 +649,7 @@ def seek_sequential(cap, target_frame):
             print(f"  ... {i + 1}/{target_frame}")
 
 
-# =========================================================
-# 10. REPRODUCTOR PRINCIPAL (con botones, estado e historial de hallazgos)
-# =========================================================
 def screen_size(fallback=(1600, 900)):
-    """Tamano de la pantalla, para que la ventana no se salga ni deje huecos."""
     try:
         import tkinter as tk
         root = tk.Tk()
@@ -635,425 +661,597 @@ def screen_size(fallback=(1600, 900)):
         return fallback
 
 
+# =========================================================
+# 10. REPRODUCTOR PRINCIPAL (multi-video + anotacion manual)
+# =========================================================
 def run_viewer(source, checkpoint_path, output_path=None, size=352,
                device=None, show_display=True, threshold=0.5, max_frames=None,
                start_frame=None, end_frame=None, cache_frames=150,
                display_width=None, display_height=None, show_panel=True,
-               video_height=None, panel_width=PANEL_W, history_dir=None):
+               video_height=None, panel_width=PANEL_W, history_dir=None,
+               playlist=None):
 
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
     if display_width is None or display_height is None:
         scr_w, scr_h = screen_size()
-        display_width = display_width or scr_w - 40          # margen de bordes
-        display_height = display_height or scr_h - 160       # barra de titulo + barra de tareas
+        display_width = display_width or scr_w - 40
+        display_height = display_height or scr_h - 160
 
     model = load_model(checkpoint_path, device)
 
-    cap_source = int(source) if str(source).isdigit() else source
-    cap = cv2.VideoCapture(cap_source)
-    if not cap.isOpened():
-        raise RuntimeError(f"No se pudo abrir la fuente de video: {source}")
-
-    src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))   # puede ser poco confiable en .avi
-
-    history_dir = history_dir or default_history_dir(source)
-
-    start_frame = start_frame or 0
-    if start_frame:
-        seek_sequential(cap, start_frame)
-    if end_frame is not None:
-        remaining = end_frame - start_frame
-        max_frames = remaining if max_frames is None else min(max_frames, remaining)
-
-    # Tamano de cada panel de video: se elige el mayor que cabe TANTO en ancho
-    # como en alto de la ventana disponible, para no dejar franjas vacias.
-    panel_total = (SEP_W + panel_width) if show_panel else 0
-    max_video_w = max(200, (display_width - SEP_W - panel_total) // 2)
-    max_video_h = max(200, display_height - BAR_H)
-
-    if video_height is not None:
-        scale = video_height / frame_h
-    else:
-        scale = min(max_video_w / frame_w, max_video_h / frame_h)
-    scale = min(scale, max_video_w / frame_w, max_video_h / frame_h)
-
-    disp_w = max(240, int(round(frame_w * scale)))
-    disp_h = max(200, int(round(frame_h * scale)))
-
-    # Con videos 16:9 lado a lado, el ancho manda y sobra alto. Ese sobrante se
-    # le da al panel lateral (los videos quedan centrados verticalmente),
-    # en vez de dejar una franja vacia.
-    canvas_w = disp_w * 2 + SEP_W + panel_total
-    min_panel_h = 560 if show_panel else 0
-    canvas_h = min(max_video_h, max(disp_h, min_panel_h))
-    pad_top = (canvas_h - disp_h) // 2
-    panel_x0 = disp_w * 2 + SEP_W * 2   # x donde arranca el panel lateral dentro del canvas
-    print(f"Video {frame_w}x{frame_h} -> panel de {disp_w}x{disp_h} | "
-          f"ventana {canvas_w}x{canvas_h + BAR_H} (pantalla util {display_width}x{display_height})")
-    print(f"El historial de hallazgos se guardara en: {history_dir}")
+    videos = list(playlist) if playlist else [source]
+    try:
+        video_idx = videos.index(source)
+    except ValueError:
+        video_idx = 0
 
     window_name = "Original | Segmentacion UACANet-v2"
     display_ok = show_display
-    if display_ok:
-        try:
-            cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
-        except cv2.error:
-            print("No hay backend grafico disponible (ej. Kaggle). Desactivando ventana en vivo.")
-            display_ok = False
+    window_created = False
+    trackbars_created = False
 
-    writer = None
-    if output_path:
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(output_path, fourcc, src_fps, (canvas_w, canvas_h))
-        print(f"Guardando salida en: {output_path}")
+    # preferencias de UI que se conservan al cambiar de video
+    threshold = threshold
+    analysis_on = True
+    render_mode = "mask"
+    brush_mode = False
+    brush_radius = 15
 
-    # --- estado del reproductor ---
-    cache = deque(maxlen=max(2, cache_frames))
-    pos = -1
-    paused = False
-    quit_flag = False
-    pending_step = 0
+    # Estos dos los usan los callbacks de los trackbars, que en Windows SOLO
+    # se pueden crear una vez por ventana (ver mas abajo el porque). Por eso
+    # viven aqui, fuera del loop de videos, en vez de recrearse cada vez que
+    # se cambia de video: el callback que OpenCV ya registro sigue
+    # apuntando a este mismo diccionario pase lo que pase.
     pending_seek = {"target": None}
     suppress_seek_cb = {"flag": False}
-    analysis_on = True
-    render_mode = "mask"          # "mask" (relleno) o "bbox" (solo rectangulo)
-    read_idx = start_frame          # indice global del proximo frame a leer
-    processed = 0
-    failed_reads = 0
-    scale_state = {"s": 1.0}
-    rects_state = {"r": []}
-    t_start = time.time()
 
-    # --- historial de hallazgos ---
-    findings = []                 # lista de {"idx", "time_s", "thumb"}
-    registered_frames = set()     # frames ya registrados, para no duplicar al retroceder
-    history_rects = []            # (y0, y1, frame_idx) del ultimo render, para clics
-    scroll_offset = 0
-    max_scroll = 0
+    # Rango del slider de posicion: se usa el video MAS LARGO de la lista
+    # para que el mismo slider (creado una sola vez) sirva para cualquiera.
+    # Si cambia de video, un numero mas alto que la duracion de ese video en
+    # particular simplemente no hace nada raro (jump_to se detiene al
+    # llegar al final).
+    max_total_frames = 0
+    for v in videos:
+        if isinstance(v, int) or str(v).isdigit():
+            continue
+        probe = cv2.VideoCapture(v)
+        if probe.isOpened():
+            max_total_frames = max(max_total_frames, int(probe.get(cv2.CAP_PROP_FRAME_COUNT)))
+        probe.release()
 
-    def read_and_process():
-        """Lee el siguiente frame del video y, si el analisis esta activo,
-        lo segmenta; en cualquier caso lo mete al cache."""
-        nonlocal pos, read_idx, processed, failed_reads
-        consecutive = 0
-        while True:
-            ret, frame = cap.read()
-            if ret:
-                break
-            failed_reads += 1
-            consecutive += 1
-            read_idx += 1
-            if consecutive >= 30:
-                return False     # fin del video o corrupcion severa
+    print("\nControles: ESPACIO=pausa | s=stop | a/d=+-1 frame | z/x=+-10 | -/+=umbral | "
+          "v=analisis on/off | m=modo mascara/bbox | e=anotar manual | [ ]=pincel | "
+          "c=borrar marca | g=guardar marca | n/p=siguiente/anterior video | q=salir\n")
 
-        if analysis_on:
-            mask_prob, _ = segment_frame(model, frame, device, size=size)
-            prob_u8 = (mask_prob * 255).astype(np.uint8)      # cache liviano
-        else:
-            prob_u8 = None
+    while True:
+        cur_source = videos[video_idx]
+        cap_source = int(cur_source) if str(cur_source).isdigit() else cur_source
+        is_camera = isinstance(cap_source, int)
 
-        cache.append({
-            "frame": frame,
-            "prob": prob_u8,
-            "idx": read_idx,
-            "written": False,
-        })
-        pos = len(cache) - 1
-        read_idx += 1
-        processed += 1
-        return True
-
-    def jump_to(target):
-        """Salta a un frame por indice absoluto, sin usar CAP_PROP_POS_FRAMES
-        (poco confiable en estos .avi/MJPEG). Tres casos: ya esta en el
-        buffer -> instantaneo; esta mas adelante -> se saltan frames sin
-        decodificar (cap.grab, barato) hasta llegar; esta mas atras del
-        buffer -> se reabre el video y se reposiciona leyendo desde el inicio
-        (lento en saltos grandes hacia atras, pero confiable)."""
-        nonlocal pos, read_idx, cap
-        target = max(0, target)
-
-        for i, e in enumerate(cache):
-            if e["idx"] == target:
-                pos = i
-                return
-        if cache and target > cache[-1]["idx"]:
-            to_skip = target - read_idx
-            if to_skip > 0:
-                print(f"Saltando {to_skip} frames hasta el {target} (sin decodificar)...")
-                for _ in range(to_skip):
-                    if not cap.grab():
-                        break
-                    read_idx += 1
-            read_and_process()
-            return
-
-        if isinstance(cap_source, int):
-            print("No se puede saltar hacia atras en una camara en vivo; se ignora el salto.")
-            return
-        print(f"Reabriendo el video para llegar al frame {target} (salto hacia atras)...")
-        cap.release()
         cap = cv2.VideoCapture(cap_source)
-        seek_sequential(cap, target)
-        cache.clear()
-        read_idx = target
-        read_and_process()
+        if not cap.isOpened():
+            print(f"No se pudo abrir: {cur_source}; se omite.")
+            if len(videos) == 1:
+                raise RuntimeError(f"No se pudo abrir la fuente de video: {cur_source}")
+            video_idx = (video_idx + 1) % len(videos)
+            continue
 
-    def on_mouse(event, x, y, flags, param):
-        nonlocal paused, pending_step, quit_flag, threshold, analysis_on, render_mode, scroll_offset
-        s = scale_state["s"]
-        xc, yc = x / s, y / s
+        src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        if event == cv2.EVENT_LBUTTONDOWN:
-            if yc < canvas_h:
-                if show_panel and xc >= panel_x0:
-                    # clic sobre el panel lateral: revisar si cayo en una miniatura
-                    for ry0, ry1, fidx in history_rects:
-                        if ry0 <= (yc - HEADER_H) <= ry1:
-                            paused = True
-                            pending_seek["target"] = fidx
-                            break
-                return
-            for x0, x1, action in rects_state["r"]:
-                if x0 <= xc <= x1:
-                    if action == "toggle":
-                        paused = not paused
-                    elif action == "stop":
-                        paused = True
-                        jump_to(0)
-                    elif action == "back1":
-                        pending_step = -1
-                    elif action == "back10":
-                        pending_step = -10
-                    elif action == "fwd1":
-                        pending_step = 1
-                    elif action == "fwd10":
-                        pending_step = 10
-                    elif action == "thr_down":
-                        threshold = max(0.05, threshold - 0.05)
-                    elif action == "thr_up":
-                        threshold = min(0.95, threshold + 0.05)
-                    elif action == "toggle_analysis":
-                        analysis_on = not analysis_on
-                    elif action == "toggle_mode":
-                        render_mode = "bbox" if render_mode == "mask" else "mask"
-                    elif action == "quit":
-                        quit_flag = True
+        cur_history_dir = history_dir if (history_dir and len(videos) == 1) else default_history_dir(cur_source)
+        findings, manual_annotations = load_history(cur_history_dir, src_fps)
+        registered_frames = {f["idx"] for f in findings if f.get("tipo", "automatico") == "automatico"}
+        if findings:
+            print(f"Se cargaron {len(findings)} hallazgo(s) previos de '{cur_history_dir}'.")
+
+        # --start-time/--end-time/--max-frames solo aplican al primer video de la lista;
+        # al cambiar de video (n/p) cada uno se procesa completo desde el inicio.
+        start_frame_eff = (start_frame or 0) if video_idx == 0 else 0
+        if start_frame_eff:
+            seek_sequential(cap, start_frame_eff)
+
+        max_frames_eff = max_frames if video_idx == 0 else None
+        if video_idx == 0 and end_frame is not None:
+            remaining = end_frame - start_frame_eff
+            max_frames_eff = remaining if max_frames_eff is None else min(max_frames_eff, remaining)
+
+        panel_total = (SEP_W + panel_width) if show_panel else 0
+        max_video_w = max(200, (display_width - SEP_W - panel_total) // 2)
+        max_video_h = max(200, display_height - BAR_H)
+        if video_height is not None:
+            scale = video_height / frame_h
+        else:
+            scale = min(max_video_w / frame_w, max_video_h / frame_h)
+        scale = min(scale, max_video_w / frame_w, max_video_h / frame_h)
+        disp_w = max(240, int(round(frame_w * scale)))
+        disp_h = max(200, int(round(frame_h * scale)))
+        canvas_w = disp_w * 2 + SEP_W + panel_total
+        min_panel_h = 560 if show_panel else 0
+        canvas_h = min(max_video_h, max(disp_h, min_panel_h))
+        pad_top = (canvas_h - disp_h) // 2
+        panel_x0 = disp_w * 2 + SEP_W * 2
+
+        video_label = "Camara en vivo" if is_camera else \
+            f"Video {video_idx + 1}/{len(videos)}: {os.path.basename(str(cur_source))}"
+        print(f"\n{video_label}")
+        print(f"{frame_w}x{frame_h} -> panel {disp_w}x{disp_h} | ventana {canvas_w}x{canvas_h + BAR_H}")
+        print(f"Historial: {cur_history_dir}")
+
+        win_scale = min(1.0, display_width / canvas_w) if canvas_w else 1.0
+        win_w = max(1, int(canvas_w * win_scale))
+        win_h = max(1, int((canvas_h + BAR_H) * win_scale))
+
+        if display_ok and not window_created:
+            try:
+                # WINDOW_NORMAL (no AUTOSIZE) a proposito: con trackbars en la
+                # ventana, dejar que una AUTOSIZE se auto-redimensione cuando
+                # llega una imagen de OTRO tamano (justo lo que pasa al
+                # cambiar de video, porque cada uno puede tener resolucion
+                # distinta) es un crash nativo conocido de OpenCV en Windows.
+                # Con NORMAL controlamos el tamano nosotros via resizeWindow.
+                cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+                window_created = True
+            except cv2.error:
+                print("No hay backend grafico disponible (ej. Kaggle). Desactivando ventana en vivo.")
+                display_ok = False
+
+        if display_ok and window_created:
+            # Se redimensiona EXPLICITAMENTE cada vez que cambia el video
+            # (en vez de dejar que imshow lo infiera solo), porque es justo
+            # esa auto-resize implicita con trackbars puestos la que crashea.
+            cv2.resizeWindow(window_name, win_w, win_h)
+
+        cur_output_path = output_path
+        if output_path and len(videos) > 1:
+            stem, ext = os.path.splitext(output_path)
+            cur_output_path = f"{stem}_{os.path.splitext(os.path.basename(str(cur_source)))[0]}{ext or '.mp4'}"
+
+        writer = None
+        if cur_output_path:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(cur_output_path, fourcc, src_fps, (canvas_w, canvas_h))
+            print(f"Guardando salida en: {cur_output_path}")
+
+        # --- estado de esta sesion de video ---
+        cache = deque(maxlen=max(2, cache_frames))
+        pos = -1
+        paused = False
+        read_idx = start_frame_eff
+        processed = 0
+        failed_reads = 0
+        pending_step = 0
+        pending_seek["target"] = None           # reset logico; el dict en si se conserva entre videos
+        scale_state = {"s": 1.0}
+        rects_state = {"r": []}
+        scroll_offset = 0
+        max_scroll = 0
+        history_rects = []
+        is_drawing = False
+        erase_mode = False
+        nav = {"action": None}   # None | "quit_app" | "next_video" | "prev_video"
+        t_start = time.time()
+
+        def read_and_process():
+            nonlocal pos, read_idx, processed, failed_reads
+            consecutive = 0
+            while True:
+                ret, frame = cap.read()
+                if ret:
                     break
+                failed_reads += 1
+                consecutive += 1
+                read_idx += 1
+                if consecutive >= 30:
+                    return False
 
-        elif event == cv2.EVENT_MOUSEWHEEL:
-            if yc < canvas_h and show_panel and xc >= panel_x0 and (yc - HEADER_H) >= 0:
-                wheel = np.int16(flags >> 16)   # positivo = rueda hacia adelante/arriba
-                step = 45
-                if wheel > 0:
-                    scroll_offset = max(0, scroll_offset - step)
+            if analysis_on:
+                mask_prob, _ = segment_frame(model, frame, device, size=size)
+                prob_u8 = (mask_prob * 255).astype(np.uint8)
+            else:
+                prob_u8 = None
+
+            cache.append({"frame": frame, "prob": prob_u8, "idx": read_idx, "written": False})
+            pos = len(cache) - 1
+            read_idx += 1
+            processed += 1
+            return True
+
+        def jump_to(target):
+            nonlocal pos, read_idx, cap
+            target = max(0, target)
+
+            for i, e in enumerate(cache):
+                if e["idx"] == target:
+                    pos = i
+                    return
+            if cache and target > cache[-1]["idx"]:
+                to_skip = target - read_idx
+                if to_skip > 0:
+                    print(f"Saltando {to_skip} frames hasta el {target} (sin decodificar)...")
+                    for _ in range(to_skip):
+                        if not cap.grab():
+                            break
+                        read_idx += 1
+                read_and_process()
+                return
+
+            if is_camera:
+                print("No se puede retroceder en una camara en vivo; se ignora el salto.")
+                return
+            print(f"Reabriendo el video para llegar al frame {target} (salto hacia atras)...")
+            cap.release()
+            cap = cv2.VideoCapture(cap_source)
+            seek_sequential(cap, target)
+            cache.clear()
+            read_idx = target
+            read_and_process()
+
+        def locate_overlay_coords(xc, yc):
+            """Convierte una coordenada de ventana (ya des-escalada) a coordenadas
+            del frame original, solo si cae dentro del panel de SEGMENTACION."""
+            if not (pad_top <= yc < pad_top + disp_h):
+                return None
+            x0 = disp_w + SEP_W
+            if not (x0 <= xc < x0 + disp_w):
+                return None
+            return (xc - x0) / scale, (yc - pad_top) / scale
+
+        def paint_at(fx, fy, erase):
+            if pos < 0:
+                return
+            entry = cache[pos]
+            idx = entry["idx"]
+            if idx not in manual_annotations:
+                manual_annotations[idx] = np.zeros(entry["frame"].shape[:2], dtype=np.uint8)
+            cv2.circle(manual_annotations[idx], (int(fx), int(fy)),
+                      brush_radius, 0 if erase else 255, -1)
+
+        def save_manual_mark():
+            if pos < 0:
+                return
+            entry = cache[pos]
+            idx = entry["idx"]
+            mask = manual_annotations.get(idx)
+            if mask is None or not mask.any():
+                print("No hay marca manual en este frame para guardar.")
+                return
+            ys, xs = np.where(mask > 0)
+            bbox = (int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))
+            temp = entry["frame"].copy()
+            color_layer = np.zeros_like(temp)
+            color_layer[:] = (0, 215, 255)
+            m3 = (mask > 0)[:, :, None]
+            temp = np.where(m3, cv2.addWeighted(temp, 0.55, color_layer, 0.45, 0), temp)
+            contours, _ = cv2.findContours((mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(temp, contours, -1, (0, 165, 255), 2)
+            thumb = make_finding_thumbnail(temp, bbox, THUMB_W, THUMB_H)
+            findings[:] = [it for it in findings if not (it["idx"] == idx and it.get("tipo") == "manual")]
+            findings.append({"idx": idx, "time_s": idx / src_fps if src_fps else 0.0,
+                             "thumb": thumb, "tipo": "manual", "mask": mask.copy()})
+            registered_frames.add(idx)
+            print(f"Marca manual guardada (frame {idx}).")
+
+        def on_mouse(event, x, y, flags, param):
+            nonlocal paused, pending_step, threshold, analysis_on, render_mode, \
+                scroll_offset, brush_mode, is_drawing, erase_mode
+            s = scale_state["s"]
+            xc, yc = x / s, y / s
+
+            if event == cv2.EVENT_LBUTTONDOWN:
+                if yc < canvas_h:
+                    if show_panel and xc >= panel_x0:
+                        for ry0, ry1, fidx in history_rects:
+                            if ry0 <= (yc - HEADER_H) <= ry1:
+                                paused = True
+                                pending_seek["target"] = fidx
+                                break
+                    elif brush_mode:
+                        coords = locate_overlay_coords(xc, yc)
+                        if coords:
+                            is_drawing = True
+                            erase_mode = False
+                            paint_at(*coords, erase=False)
+                    return
+                for x0, x1, action in rects_state["r"]:
+                    if x0 <= xc <= x1:
+                        if action == "toggle":
+                            paused = not paused
+                        elif action == "stop":
+                            paused = True
+                            pending_seek["target"] = 0
+                        elif action == "back1":
+                            pending_step = -1
+                        elif action == "back10":
+                            pending_step = -10
+                        elif action == "fwd1":
+                            pending_step = 1
+                        elif action == "fwd10":
+                            pending_step = 10
+                        elif action == "thr_down":
+                            threshold = max(0.05, threshold - 0.05)
+                        elif action == "thr_up":
+                            threshold = min(0.95, threshold + 0.05)
+                        elif action == "toggle_analysis":
+                            analysis_on = not analysis_on
+                        elif action == "toggle_mode":
+                            render_mode = "bbox" if render_mode == "mask" else "mask"
+                        elif action == "toggle_manual":
+                            brush_mode = not brush_mode
+                            if brush_mode:
+                                paused = True
+                        elif action == "save_manual":
+                            save_manual_mark()
+                        elif action == "prev_video":
+                            nav["action"] = "prev_video"
+                        elif action == "next_video":
+                            nav["action"] = "next_video"
+                        elif action == "quit":
+                            nav["action"] = "quit_app"
+                        break
+
+            elif event == cv2.EVENT_RBUTTONDOWN:
+                if yc < canvas_h and brush_mode and not (show_panel and xc >= panel_x0):
+                    coords = locate_overlay_coords(xc, yc)
+                    if coords:
+                        is_drawing = True
+                        erase_mode = True
+                        paint_at(*coords, erase=True)
+
+            elif event == cv2.EVENT_MOUSEMOVE:
+                if is_drawing:
+                    coords = locate_overlay_coords(xc, yc)
+                    if coords:
+                        paint_at(*coords, erase=erase_mode)
+
+            elif event in (cv2.EVENT_LBUTTONUP, cv2.EVENT_RBUTTONUP):
+                is_drawing = False
+
+            elif event == cv2.EVENT_MOUSEWHEEL:
+                if yc < canvas_h and show_panel and xc >= panel_x0 and (yc - HEADER_H) >= 0:
+                    wheel = np.int16(flags >> 16)
+                    step = 45
+                    if wheel > 0:
+                        scroll_offset = max(0, scroll_offset - step)
+                    else:
+                        scroll_offset = min(max_scroll, scroll_offset + step)
+
+        if display_ok:
+            # setMouseCallback SI se puede volver a llamar en cada video sin
+            # problema (solo reemplaza un puntero a funcion); lo que NO es
+            # seguro en Windows es recrear los TRACKBARS cada vez -> por eso
+            # estos se crean una unica vez, la primera pasada por aqui.
+            cv2.setMouseCallback(window_name, on_mouse)
+
+            if not trackbars_created:
+                def _on_threshold_trackbar(val):
+                    nonlocal threshold
+                    threshold = max(0.05, val / 100.0)
+
+                def _on_position_trackbar(val):
+                    if suppress_seek_cb["flag"]:
+                        return
+                    pending_seek["target"] = val
+
+                cv2.createTrackbar("Umbral x100", window_name, int(threshold * 100), 95,
+                                   _on_threshold_trackbar)
+                if max_total_frames > 0:
+                    cv2.createTrackbar("Posicion", window_name, start_frame_eff,
+                                       max(1, max_total_frames - 1), _on_position_trackbar)
                 else:
-                    scroll_offset = min(max_scroll, scroll_offset + step)
+                    print("Aviso: no se pudo determinar la duracion de los videos; "
+                          "el slider de posicion queda desactivado (usa los botones).")
+                trackbars_created = True
+            else:
+                # la ventana y los trackbars ya existian de un video anterior;
+                # solo se refleja el umbral vigente, nada se vuelve a crear.
+                cv2.setTrackbarPos("Umbral x100", window_name, int(round(threshold * 100)))
+
+        def build_canvas(entry, prev_entry):
+            nonlocal max_scroll, history_rects
+
+            if entry["prob"] is None and analysis_on:
+                mask_prob, _ = segment_frame(model, entry["frame"], device, size=size)
+                entry["prob"] = (mask_prob * 255).astype(np.uint8)
+
+            if entry["prob"] is None:
+                overlay = entry["frame"].copy()
+            else:
+                mask_prob = entry["prob"].astype(np.float32) / 255.0
+                overlay, binary = make_overlay(entry["frame"], mask_prob, threshold=threshold,
+                                               mode=render_mode)
+                region_info = analyze_regions(binary)
+                has_detection = region_info["has_detection"]
+
+                prev_had_detection = False
+                if prev_entry is not None and prev_entry["prob"] is not None:
+                    prev_binary = ((prev_entry["prob"].astype(np.float32) / 255.0) > threshold).astype(np.uint8)
+                    prev_had_detection = analyze_regions(prev_binary)["has_detection"]
+
+                if has_detection and not prev_had_detection and entry["idx"] not in registered_frames:
+                    thumb = make_finding_thumbnail(overlay, region_info["bbox"], THUMB_W, THUMB_H)
+                    findings.append({"idx": entry["idx"], "time_s": entry["idx"] / src_fps if src_fps else 0.0,
+                                     "thumb": thumb, "tipo": "automatico"})
+                    registered_frames.add(entry["idx"])
+
+            manual_mask = manual_annotations.get(entry["idx"])
+            if manual_mask is not None and manual_mask.any():
+                color_layer = np.zeros_like(overlay)
+                color_layer[:] = (0, 215, 255)
+                m3 = (manual_mask > 0)[:, :, None]
+                overlay = np.where(m3, cv2.addWeighted(overlay, 0.55, color_layer, 0.45, 0), overlay)
+                contours, _ = cv2.findContours((manual_mask > 0).astype(np.uint8),
+                                               cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(overlay, contours, -1, (0, 165, 255), 2)
+
+            interp = cv2.INTER_AREA if disp_w < frame_w else cv2.INTER_LINEAR
+            vid = cv2.resize(entry["frame"], (disp_w, disp_h), interpolation=interp)
+            ovr = cv2.resize(overlay, (disp_w, disp_h), interpolation=interp)
+
+            def column(img):
+                if canvas_h == disp_h:
+                    return img
+                col = np.zeros((canvas_h, disp_w, 3), dtype=np.uint8)
+                col[pad_top:pad_top + disp_h] = img
+                return col
+
+            sep = np.full((canvas_h, SEP_W, 3), 40, dtype=np.uint8)
+            parts = [column(vid), sep, column(ovr)]
+            if show_panel:
+                t_s = entry["idx"] / src_fps if src_fps else 0.0
+                header = draw_status_header(panel_width, HEADER_H, entry["idx"], t_s, paused,
+                                            threshold, render_mode, analysis_on, len(findings),
+                                            brush_mode, brush_radius, video_label)
+                hist_h = canvas_h - HEADER_H
+                hist_section, history_rects, total_content_h = draw_history_section(
+                    panel_width, hist_h, findings, scroll_offset)
+                max_scroll = max(0, total_content_h - hist_h)
+                panel = np.vstack([header, hist_section])
+                parts += [sep.copy(), panel]
+            canvas = np.hstack(parts)
+
+            ty = pad_top + 28
+            label_right = "Segmentacion UACANet-v2" if analysis_on else "Segmentacion (analisis OFF)"
+            right_col = (255, 255, 255) if analysis_on else (0, 165, 255)
+            if brush_mode:
+                label_right += "  [ANOTACION MANUAL]"
+                right_col = (0, 215, 255)
+            cv2.putText(canvas, "Video original", (10, ty), FONT, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(canvas, label_right, (disp_w + SEP_W + 10, ty), FONT, 0.8, right_col, 2, cv2.LINE_AA)
+            return canvas
+
+        try:
+            while nav["action"] is None:
+                if pending_seek["target"] is not None:
+                    target = pending_seek["target"]
+                    pending_seek["target"] = None
+                    paused = True
+                    jump_to(target)
+
+                if pending_step != 0:
+                    paused = True
+                    if pending_step < 0:
+                        pos = max(0, pos + pending_step)
+                    else:
+                        for _ in range(pending_step):
+                            if pos < len(cache) - 1:
+                                pos += 1
+                            elif not read_and_process():
+                                break
+                    pending_step = 0
+                elif not paused:
+                    if pos < len(cache) - 1:
+                        pos += 1
+                    else:
+                        if max_frames_eff is not None and processed >= max_frames_eff:
+                            print("\nSe alcanzo el limite de frames solicitado.")
+                            paused = True
+                            if not display_ok:
+                                nav["action"] = "quit_app"
+                                break
+                        elif not read_and_process():
+                            print("\nFin del video (o lecturas fallidas seguidas).")
+                            paused = True
+                            if not display_ok:
+                                nav["action"] = "quit_app"
+                                break
+
+                if pos < 0:
+                    if not read_and_process():
+                        nav["action"] = "quit_app"
+                        break
+
+                entry = cache[pos]
+                prev_entry = cache[pos - 1] if pos > 0 else None
+                canvas = build_canvas(entry, prev_entry)
+
+                if writer is not None and not entry["written"]:
+                    writer.write(canvas[:canvas_h, :canvas_w])
+                    entry["written"] = True
+
+                if not display_ok:
+                    continue
+
+                bar, rects = draw_button_bar(canvas_w, paused, analysis_on, render_mode, brush_mode)
+                rects_state["r"] = rects
+                full = np.vstack([canvas, bar])
+
+                s = min(1.0, display_width / full.shape[1])
+                scale_state["s"] = s
+                shown = cv2.resize(full, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) if s < 1.0 else full
+                cv2.imshow(window_name, shown)
+
+                cv2.setTrackbarPos("Umbral x100", window_name, int(round(threshold * 100)))
+                if max_total_frames > 0:
+                    suppress_seek_cb["flag"] = True
+                    cv2.setTrackbarPos("Posicion", window_name, min(entry["idx"], max_total_frames - 1))
+                    suppress_seek_cb["flag"] = False
+
+                key = cv2.waitKey(30 if paused else 1) & 0xFF
+                if key in (ord("q"), 27):
+                    nav["action"] = "quit_app"
+                elif key == 32:
+                    paused = not paused
+                elif key == ord("s"):
+                    paused = True
+                    pending_seek["target"] = 0
+                elif key in (ord("a"), 81):
+                    pending_step = -1
+                elif key in (ord("d"), 83):
+                    pending_step = 1
+                elif key == ord("z"):
+                    pending_step = -10
+                elif key == ord("x"):
+                    pending_step = 10
+                elif key in (ord("-"), ord("_")):
+                    threshold = max(0.05, threshold - 0.05)
+                elif key in (ord("+"), ord("=")):
+                    threshold = min(0.95, threshold + 0.05)
+                elif key == ord("v"):
+                    analysis_on = not analysis_on
+                elif key == ord("m"):
+                    render_mode = "bbox" if render_mode == "mask" else "mask"
+                elif key == ord("e"):
+                    brush_mode = not brush_mode
+                    if brush_mode:
+                        paused = True
+                elif key == ord("["):
+                    brush_radius = max(3, brush_radius - 3)
+                elif key == ord("]"):
+                    brush_radius = min(60, brush_radius + 3)
+                elif key == ord("c"):
+                    if pos >= 0:
+                        manual_annotations.pop(cache[pos]["idx"], None)
+                elif key == ord("g"):
+                    save_manual_mark()
+                elif key == ord("n") and len(videos) > 1:
+                    nav["action"] = "next_video"
+                elif key == ord("p") and len(videos) > 1:
+                    nav["action"] = "prev_video"
+        finally:
+            cap.release()
+            if writer is not None:
+                writer.release()
+            save_history(findings, cur_history_dir)
+
+        elapsed = time.time() - t_start
+        print(f"\nProcesados {processed} frames en {elapsed:.1f}s")
+        if failed_reads:
+            print(f"Nota: {failed_reads} lecturas fallaron (cuadros corruptos del .avi) y se saltaron.")
+
+        if nav["action"] in (None, "quit_app"):
+            break
+        elif nav["action"] == "next_video":
+            video_idx = (video_idx + 1) % len(videos)
+        else:
+            video_idx = (video_idx - 1) % len(videos)
 
     if display_ok:
-        cv2.setMouseCallback(window_name, on_mouse)
-
-        def _on_threshold_trackbar(val):
-            nonlocal threshold
-            threshold = max(0.05, val / 100.0)
-
-        def _on_position_trackbar(val):
-            if suppress_seek_cb["flag"]:
-                return
-            pending_seek["target"] = val
-
-        cv2.createTrackbar("Umbral x100", window_name, int(threshold * 100), 95,
-                           _on_threshold_trackbar)
-        if total_frames > 0:
-            cv2.createTrackbar("Posicion", window_name, start_frame, max(1, total_frames - 1),
-                               _on_position_trackbar)
-        else:
-            print("Aviso: el conteo de frames del video no es confiable; "
-                  "el slider de posicion queda desactivado (usa los botones).")
-
-    def build_canvas(entry, prev_entry):
-        nonlocal max_scroll, history_rects
-
-        # Si este frame se leyo con el analisis apagado pero ahora esta
-        # prendido (ej. lo prendiste mientras estabas parado en el), se
-        # analiza aqui mismo bajo demanda en vez de dejarlo sin marcar.
-        if entry["prob"] is None and analysis_on:
-            mask_prob, _ = segment_frame(model, entry["frame"], device, size=size)
-            entry["prob"] = (mask_prob * 255).astype(np.uint8)
-
-        if entry["prob"] is None:
-            overlay = entry["frame"]
-            has_detection = False
-        else:
-            mask_prob = entry["prob"].astype(np.float32) / 255.0
-            overlay, binary = make_overlay(entry["frame"], mask_prob, threshold=threshold,
-                                           mode=render_mode)
-            region_info = analyze_regions(binary)
-            has_detection = region_info["has_detection"]
-
-            # --- registrar un hallazgo nuevo: polipo visible ahora, y no en
-            #     el frame inmediatamente anterior ---
-            prev_had_detection = False
-            if prev_entry is not None and prev_entry["prob"] is not None:
-                prev_binary = ((prev_entry["prob"].astype(np.float32) / 255.0) > threshold).astype(np.uint8)
-                prev_had_detection = analyze_regions(prev_binary)["has_detection"]
-
-            if has_detection and not prev_had_detection and entry["idx"] not in registered_frames:
-                thumb = make_finding_thumbnail(overlay, region_info["bbox"], THUMB_W, THUMB_H)
-                findings.append({
-                    "idx": entry["idx"],
-                    "time_s": entry["idx"] / src_fps if src_fps else 0.0,
-                    "thumb": thumb,
-                })
-                registered_frames.add(entry["idx"])
-
-        interp = cv2.INTER_AREA if disp_w < frame_w else cv2.INTER_LINEAR
-        vid = cv2.resize(entry["frame"], (disp_w, disp_h), interpolation=interp)
-        ovr = cv2.resize(overlay, (disp_w, disp_h), interpolation=interp)
-
-        def column(img):
-            if canvas_h == disp_h:
-                return img
-            col = np.zeros((canvas_h, disp_w, 3), dtype=np.uint8)
-            col[pad_top:pad_top + disp_h] = img
-            return col
-
-        sep = np.full((canvas_h, SEP_W, 3), 40, dtype=np.uint8)
-        parts = [column(vid), sep, column(ovr)]
-        if show_panel:
-            t_s = entry["idx"] / src_fps if src_fps else 0.0
-            header = draw_status_header(panel_width, HEADER_H, entry["idx"], t_s, paused,
-                                        threshold, render_mode, analysis_on, len(findings))
-            hist_h = canvas_h - HEADER_H
-            hist_section, history_rects, total_content_h = draw_history_section(
-                panel_width, hist_h, findings, scroll_offset)
-            max_scroll = max(0, total_content_h - hist_h)
-            panel = np.vstack([header, hist_section])
-            parts += [sep.copy(), panel]
-        canvas = np.hstack(parts)
-
-        ty = pad_top + 28
-        label_right = "Segmentacion UACANet-v2" if analysis_on else "Segmentacion (analisis OFF)"
-        cv2.putText(canvas, "Video original", (10, ty), FONT, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(canvas, label_right, (disp_w + SEP_W + 10, ty),
-                    FONT, 0.8, (255, 255, 255) if analysis_on else (0, 165, 255), 2, cv2.LINE_AA)
-        return canvas
-
-    print("\nControles: ESPACIO=pausa | s=stop | a/flecha izq=-1 | d/flecha der=+1 | "
-          "z=-10 | x=+10 | -/+=umbral | v=analisis on/off | m=modo mascara/bbox | "
-          "rueda del mouse sobre el panel=desplaza el historial | clic en una miniatura=salta ahi | "
-          "sliders de Umbral y Posicion arriba de la ventana | q=salir\n")
-
-    try:
-        while not quit_flag:
-            # --- saltos absolutos pedidos por el slider de posicion ---
-            if pending_seek["target"] is not None:
-                target = pending_seek["target"]
-                pending_seek["target"] = None
-                paused = True
-                jump_to(target)
-
-            # --- avanzar la posicion segun estado ---
-            if pending_step != 0:
-                paused = True
-                if pending_step < 0:
-                    pos = max(0, pos + pending_step)
-                else:
-                    for _ in range(pending_step):
-                        if pos < len(cache) - 1:
-                            pos += 1
-                        elif not read_and_process():
-                            break
-                pending_step = 0
-            elif not paused:
-                if pos < len(cache) - 1:
-                    pos += 1                       # reproduciendo dentro del buffer
-                else:
-                    if max_frames is not None and processed >= max_frames:
-                        print("\nSe alcanzo el limite de frames solicitado.")
-                        paused = True
-                        if not display_ok:
-                            break
-                    elif not read_and_process():
-                        print("\nFin del video (o lecturas fallidas seguidas).")
-                        paused = True
-                        if not display_ok:
-                            break
-
-            if pos < 0:
-                if not read_and_process():
-                    break
-
-            entry = cache[pos]
-            prev_entry = cache[pos - 1] if pos > 0 else None
-            canvas = build_canvas(entry, prev_entry)
-
-            # guardar en video solo los frames nuevos, una vez
-            if writer is not None and not entry["written"]:
-                writer.write(canvas[:canvas_h, :canvas_w])
-                entry["written"] = True
-
-            if not display_ok:
-                continue
-
-            bar, rects = draw_button_bar(canvas_w, paused, analysis_on, render_mode)
-            rects_state["r"] = rects
-            full = np.vstack([canvas, bar])
-
-            s = min(1.0, display_width / full.shape[1])
-            scale_state["s"] = s
-            shown = cv2.resize(full, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) if s < 1.0 else full
-            cv2.imshow(window_name, shown)
-
-            # reflejar la posicion y el umbral actuales en los sliders (por si se
-            # cambiaron con botones/teclado), sin disparar un salto en bucle
-            cv2.setTrackbarPos("Umbral x100", window_name, int(round(threshold * 100)))
-            if total_frames > 0:
-                suppress_seek_cb["flag"] = True
-                cv2.setTrackbarPos("Posicion", window_name, min(entry["idx"], total_frames - 1))
-                suppress_seek_cb["flag"] = False
-
-            key = cv2.waitKey(30 if paused else 1) & 0xFF
-            if key in (ord("q"), 27):
-                break
-            elif key == 32:                      # espacio
-                paused = not paused
-            elif key == ord("s"):                # stop -> volver al frame 0
-                paused = True
-                pending_seek["target"] = 0
-            elif key in (ord("a"), 81):          # flecha izquierda
-                pending_step = -1
-            elif key in (ord("d"), 83):          # flecha derecha
-                pending_step = 1
-            elif key == ord("z"):
-                pending_step = -10
-            elif key == ord("x"):
-                pending_step = 10
-            elif key in (ord("-"), ord("_")):
-                threshold = max(0.05, threshold - 0.05)
-            elif key in (ord("+"), ord("=")):
-                threshold = min(0.95, threshold + 0.05)
-            elif key == ord("v"):
-                analysis_on = not analysis_on
-            elif key == ord("m"):
-                render_mode = "bbox" if render_mode == "mask" else "mask"
-    finally:
-        cap.release()
-        if writer is not None:
-            writer.release()
-        if display_ok:
-            cv2.destroyAllWindows()
-        save_history(findings, history_dir)
-
-    elapsed = time.time() - t_start
-    print(f"\nProcesados {processed} frames en {elapsed:.1f}s")
-    if failed_reads:
-        print(f"Nota: {failed_reads} lecturas de frame fallaron (cuadros corruptos del .avi) y se saltaron.")
+        cv2.destroyAllWindows()
 
 
 # =========================================================
@@ -1100,7 +1298,6 @@ def process_single_frame(source, checkpoint_path, frame_index, output_path=None,
     print(f"Guardado: {output_path}")
 
     if has_detection:
-        # tambien se guarda como un hallazgo suelto, junto a la imagen anterior
         thumb_dir = default_history_dir(source)
         os.makedirs(thumb_dir, exist_ok=True)
         thumb_path = os.path.join(thumb_dir, f"hallazgo_frame{frame_index:06d}.png")
@@ -1120,7 +1317,7 @@ def process_single_frame(source, checkpoint_path, frame_index, output_path=None,
 
 
 # =========================================================
-# 12. MODO INTERACTIVO
+# 12. MODO INTERACTIVO + SELECCION DE VIDEO
 # =========================================================
 def prompt_time_range(source):
     cap_source = int(source) if str(source).isdigit() else source
@@ -1149,18 +1346,46 @@ def prompt_time_range(source):
     return start_f, end_f
 
 
+VIDEO_EXTS = {".avi", ".mp4", ".mov", ".mkv", ".mpg", ".mpeg", ".wmv"}
+
+
+def list_videos_in_dir(folder):
+    files = [f for f in sorted(os.listdir(folder)) if os.path.splitext(f)[1].lower() in VIDEO_EXTS]
+    return [os.path.join(folder, f) for f in files]
+
+
+def prompt_video_choice(videos):
+    print("\nVideos disponibles:")
+    for i, v in enumerate(videos):
+        print(f"  [{i}] {os.path.basename(v)}")
+    choice = input(f"Elige un video [0-{len(videos) - 1}] (Enter = 0): ").strip()
+    if choice == "":
+        return 0
+    try:
+        idx = int(choice)
+        if 0 <= idx < len(videos):
+            return idx
+    except ValueError:
+        pass
+    print("Opcion invalida; se usa el primero.")
+    return 0
+
+
 # =========================================================
 # 13. CLI
 # =========================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visor con controles: original vs segmentacion UACANet-v2, "
-                                                  "con historial automatico de hallazgos")
-    parser.add_argument("--source", required=True, help="Ruta a video, o indice de camara (0 = webcam)")
+                                                  "con historial automatico+manual y navegacion entre videos")
+    parser.add_argument("--source", default=None, help="Ruta a video, o indice de camara (0 = webcam)")
+    parser.add_argument("--library", default=None,
+                        help="Carpeta con varios videos: al iniciar eliges cual ver, y dentro del visor "
+                             "usas n/p (o los botones <VID / VID>) para cambiar de video.")
     parser.add_argument("--checkpoint", required=True, help="Ruta a best_model.pth / last_model.pth")
     parser.add_argument("--output", default=None, help="Ruta .mp4 para guardar el resultado (opcional)")
     parser.add_argument("--history-dir", default=None,
                         help="Carpeta donde guardar el historial de hallazgos (imagenes + CSV). "
-                             "Por defecto: '<nombre_del_video>_hallazgos' junto al video.")
+                             "Solo aplica con un unico video; con --library se usa una carpeta por video.")
     parser.add_argument("--size", type=int, default=352)
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--no-display", action="store_true", help="No abrir ventana (Kaggle/servidor)")
@@ -1168,20 +1393,31 @@ if __name__ == "__main__":
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--cache-frames", type=int, default=150,
                         help="Cuantos frames guardar en memoria para poder retroceder")
-    parser.add_argument("--display-width", type=int, default=None,
-                        help="Ancho total de la ventana. Si se omite se detecta el ancho de pantalla.")
-    parser.add_argument("--display-height", type=int, default=None,
-                        help="Alto total de la ventana. Si se omite se detecta el alto de pantalla.")
-    parser.add_argument("--video-height", type=int, default=None,
-                        help="Alto de cada panel de video (ej. 700). Si se omite se calcula solo.")
-    parser.add_argument("--panel-width", type=int, default=PANEL_W,
-                        help=f"Ancho del panel lateral en pixeles (default {PANEL_W})")
+    parser.add_argument("--display-width", type=int, default=None)
+    parser.add_argument("--display-height", type=int, default=None)
+    parser.add_argument("--video-height", type=int, default=None)
+    parser.add_argument("--panel-width", type=int, default=PANEL_W)
     parser.add_argument("--frame", type=int, default=None, help="Procesa UN SOLO frame por indice")
     parser.add_argument("--time", type=str, default=None, help="Igual que --frame pero por timecode ('7:16')")
     parser.add_argument("--start-time", type=str, default=None)
     parser.add_argument("--end-time", type=str, default=None)
     parser.add_argument("--interactive", action="store_true")
     args = parser.parse_args()
+
+    if not args.source and not args.library:
+        parser.error("Indica --source (un video o camara) o --library (una carpeta con varios videos).")
+
+    videos = None
+    if args.library:
+        videos = list_videos_in_dir(args.library)
+        if not videos:
+            raise SystemExit(f"No se encontraron videos en {args.library}")
+        start_idx = 0
+        if not args.no_display and len(videos) > 1:
+            start_idx = prompt_video_choice(videos)
+        chosen_source = videos[start_idx]
+    else:
+        chosen_source = args.source
 
     def _get_fps(src):
         cap_probe = cv2.VideoCapture(int(src) if str(src).isdigit() else src)
@@ -1191,31 +1427,31 @@ if __name__ == "__main__":
 
     frame_index = args.frame
     if args.time is not None:
-        fps = _get_fps(args.source)
+        fps = _get_fps(chosen_source)
         frame_index = parse_timecode(args.time, fps)
         print(f"Timecode {args.time} -> frame {frame_index} (fps detectado: {fps:.2f})")
 
     common = dict(
-        source=args.source, checkpoint_path=args.checkpoint, output_path=args.output,
+        source=chosen_source, checkpoint_path=args.checkpoint, output_path=args.output,
         size=args.size, show_display=not args.no_display, threshold=args.threshold,
         max_frames=args.max_frames, cache_frames=args.cache_frames,
         display_width=args.display_width, display_height=args.display_height,
         show_panel=not args.no_panel,
         video_height=args.video_height, panel_width=args.panel_width,
-        history_dir=args.history_dir,
+        history_dir=args.history_dir, playlist=videos,
     )
 
     if args.interactive:
-        start_f, end_f = prompt_time_range(args.source)
+        start_f, end_f = prompt_time_range(chosen_source)
         run_viewer(start_frame=start_f, end_frame=end_f, **common)
     elif frame_index is not None:
         process_single_frame(
-            source=args.source, checkpoint_path=args.checkpoint, frame_index=frame_index,
+            source=chosen_source, checkpoint_path=args.checkpoint, frame_index=frame_index,
             output_path=args.output, size=args.size, threshold=args.threshold,
             show_display=not args.no_display,
         )
     elif args.start_time is not None:
-        fps = _get_fps(args.source)
+        fps = _get_fps(chosen_source)
         start_f = parse_timecode(args.start_time, fps)
         end_f = parse_timecode(args.end_time, fps) if args.end_time else None
         print(f"Rango: frame {start_f}" + (f" -> {end_f}" if end_f else ""))
