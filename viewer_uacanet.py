@@ -516,7 +516,8 @@ BUTTONS_SPEC = [
     ("1>", "fwd1"), ("10>>", "fwd10"), ("-THR", "thr_down"), ("+THR", "thr_up"),
     ("ANALISIS", "toggle_analysis"), ("MODO", "toggle_mode"),
     ("ANOTAR", "toggle_manual"), ("GUARDAR", "save_manual"),
-    ("<VID", "prev_video"), ("VID>", "next_video"), ("SALIR", "quit"),
+    ("<VID", "prev_video"), ("VID>", "next_video"), ("VOLVER", "select_video"),
+    ("SALIR", "quit"),
 ]
 
 
@@ -669,7 +670,7 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
                start_frame=None, end_frame=None, cache_frames=150,
                display_width=None, display_height=None, show_panel=True,
                video_height=None, panel_width=PANEL_W, history_dir=None,
-               playlist=None):
+               playlist=None, tk_root=None, tk_root_ref=None):
 
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -687,10 +688,11 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
     except ValueError:
         video_idx = 0
 
-    window_name = "Original | Segmentacion UACANet-v2"
     display_ok = show_display
-    window_created = False
-    trackbars_created = False
+    ui_root = tk_root or ((tk_root_ref or {}).get("root"))
+    ui_events = {"action": None, "seek": None, "threshold": None,
+                 "updating_position": False}
+    ui = {}
 
     # preferencias de UI que se conservan al cambiar de video
     threshold = threshold
@@ -721,6 +723,159 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
             max_total_frames = max(max_total_frames, int(probe.get(cv2.CAP_PROP_FRAME_COUNT)))
         probe.release()
 
+    if display_ok:
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+            from PIL import Image, ImageTk
+
+            ui_root = ui_root or tk.Tk()
+            if tk_root_ref is not None:
+                tk_root_ref["root"] = ui_root
+            for child in ui_root.winfo_children():
+                child.destroy()
+            ui_root.title("UACANet | Visor de colonoscopia")
+            ui_root.configure(bg="#151a1f")
+            ui_root.protocol("WM_DELETE_WINDOW", lambda: ui_events.update(action="quit_app"))
+            ui_root.geometry(f"{min(display_width + 32, screen_size()[0])}x"
+                             f"{min(display_height + 190, screen_size()[1])}")
+
+            style = ttk.Style(ui_root)
+            style.theme_use("clam")
+            style.configure("TFrame", background="#151a1f")
+            style.configure("Panel.TFrame", background="#20272e")
+            style.configure("TLabel", background="#151a1f", foreground="#e8edf1",
+                            font=("Segoe UI", 10))
+            style.configure("Muted.TLabel", foreground="#9ba8b3", font=("Segoe UI", 9))
+            style.configure("Title.TLabel", foreground="#f3f6f8", font=("Segoe UI Semibold", 15))
+            style.configure("TButton", background="#303b44", foreground="#f3f6f8",
+                            borderwidth=0, padding=(10, 7), font=("Segoe UI", 9))
+            style.map("TButton", background=[("active", "#40515d")])
+            style.configure("Accent.TButton", background="#167d82", foreground="white")
+            style.map("Accent.TButton", background=[("active", "#19969a")])
+            style.configure("StateOn.TButton", background="#286246", foreground="white")
+            style.map("StateOn.TButton", background=[("active", "#347a58")])
+            style.configure("StateOff.TButton", background="#3b454d", foreground="#d5dde3")
+            style.map("StateOff.TButton", background=[("active", "#4a5862")])
+            style.configure("ModeMask.TButton", background="#315b78", foreground="white")
+            style.map("ModeMask.TButton", background=[("active", "#3c7195")])
+            style.configure("ModeBox.TButton", background="#695b32", foreground="white")
+            style.map("ModeBox.TButton", background=[("active", "#81703d")])
+            style.configure("StateWarning.TButton", background="#765d20", foreground="white")
+            style.map("StateWarning.TButton", background=[("active", "#927429")])
+            style.configure("Danger.TButton", background="#743d43", foreground="white")
+            style.map("Danger.TButton", background=[("active", "#955057")])
+            style.configure("Horizontal.TScale", background="#20272e", troughcolor="#34414a")
+
+            shell = ttk.Frame(ui_root, padding=(16, 12))
+            shell.pack(fill="both", expand=True)
+            header = ttk.Frame(shell)
+            header.pack(fill="x", pady=(0, 10))
+            ui["title"] = ttk.Label(header, text="UACANet", style="Title.TLabel")
+            ui["title"].pack(side="left")
+            ui["video_name"] = ttk.Label(header, text="", style="Muted.TLabel")
+            ui["video_name"].pack(side="right")
+
+            image_frame = ttk.Frame(shell, style="Panel.TFrame", padding=5)
+            image_frame.pack(fill="both", expand=True)
+            ui["image"] = tk.Label(image_frame, bg="#101417", bd=0, highlightthickness=0)
+            ui["image"].pack(anchor="center")
+
+            transport = ttk.Frame(shell, style="Panel.TFrame", padding=(8, 8))
+            transport.pack(fill="x", pady=(10, 0))
+            transport_buttons = [
+                ("Anterior", "prev_video", "TButton"), ("Inicio", "stop", "TButton"),
+                ("-10", "back10", "TButton"), ("-1", "back1", "TButton"),
+                ("Reproducir / Pausa", "toggle", "Accent.TButton"),
+                ("+1", "fwd1", "TButton"), ("+10", "fwd10", "TButton"),
+                ("Siguiente", "next_video", "TButton"),
+                ("Volver a selección", "select_video", "TButton"),
+                ("Cerrar", "quit", "Danger.TButton"),
+            ]
+            ui["state_buttons"] = {}
+            for text, action, button_style in transport_buttons:
+                button = ttk.Button(transport, text=text, style=button_style,
+                                    command=lambda action=action: ui_events.update(action=action))
+                button.pack(side="left", padx=3)
+                if action == "toggle":
+                    ui["state_buttons"]["play"] = button
+
+            options = ttk.Frame(shell, style="Panel.TFrame", padding=(10, 7))
+            options.pack(fill="x", pady=(7, 0))
+            for text, action in [("Análisis", "toggle_analysis"), ("Máscara / caja", "toggle_mode"),
+                                 ("Anotación", "toggle_manual"), ("Guardar marca", "save_manual"),
+                                 ("Borrar marca", "clear_manual"),
+                                 ("Pincel -", "brush_down"), ("Pincel +", "brush_up")]:
+                button = ttk.Button(options, text=text,
+                                    command=lambda action=action: ui_events.update(action=action))
+                button.pack(side="left", padx=(0, 6))
+                state_button = {
+                    "toggle_analysis": "analysis",
+                    "toggle_mode": "mode",
+                    "toggle_manual": "manual",
+                }.get(action)
+                if state_button:
+                    ui["state_buttons"][state_button] = button
+
+            ttk.Label(options, text="Umbral", style="Muted.TLabel").pack(side="left", padx=(12, 4))
+            ui["threshold_var"] = tk.DoubleVar(value=threshold * 100)
+            ui["threshold"] = ttk.Scale(options, from_=5, to=95, variable=ui["threshold_var"],
+                command=lambda value: ui_events.update(threshold=float(value)))
+            ui["threshold"].pack(side="left", fill="x", expand=True, padx=(0, 12))
+            ui["threshold_label"] = ttk.Label(options, text=f"{threshold:.2f}", width=5)
+            ui["threshold_label"].pack(side="left")
+
+            position = ttk.Frame(shell)
+            position.pack(fill="x", pady=(8, 0))
+            ttk.Label(position, text="Posición", style="Muted.TLabel").pack(side="left", padx=(2, 8))
+            ui["position_var"] = tk.IntVar(value=0)
+            ui["position"] = ttk.Scale(position, from_=0, to=max(1, max_total_frames - 1),
+                command=lambda value: ui_events.update(seek=int(float(value)))
+                if not ui_events["updating_position"] else None)
+            ui["position"].pack(side="left", fill="x", expand=True)
+            ui["status"] = ttk.Label(position, text="", style="Muted.TLabel", width=24, anchor="e")
+            ui["status"].pack(side="right", padx=(8, 2))
+
+            def on_key(event):
+                key = event.keysym.lower()
+                action = {"space": "toggle", "s": "stop", "a": "back1", "d": "fwd1",
+                          "z": "back10", "x": "fwd10", "v": "toggle_analysis",
+                          "m": "toggle_mode", "e": "toggle_manual", "g": "save_manual",
+                          "c": "clear_manual", "n": "next_video", "p": "prev_video",
+                          "bracketleft": "brush_down", "bracketright": "brush_up",
+                          "escape": "quit", "q": "quit"}.get(key)
+                if action:
+                    ui_events["action"] = action
+                    return "break"
+                if key in ("plus", "equal"):
+                    ui_events["threshold"] = min(95, threshold * 100 + 5)
+                elif key in ("minus", "underscore"):
+                    ui_events["threshold"] = max(5, threshold * 100 - 5)
+
+            ui_root.bind("<Key>", on_key)
+            ui_root.update_idletasks()
+        except Exception as exc:
+            print(f"No se pudo iniciar la interfaz Tkinter ({exc}); se desactiva la ventana.")
+            display_ok = False
+
+    def update_ui_buttons():
+        if not display_ok or "state_buttons" not in ui:
+            return
+
+        buttons = ui["state_buttons"]
+        buttons["play"].configure(
+            text="Pausar" if not paused else "Reanudar",
+            style="StateOn.TButton" if not paused else "StateOff.TButton")
+        buttons["analysis"].configure(
+            text="Análisis: ON" if analysis_on else "Análisis: OFF",
+            style="StateOn.TButton" if analysis_on else "StateOff.TButton")
+        buttons["mode"].configure(
+            text="Modo: Máscara" if render_mode == "mask" else "Modo: Caja (BBox)",
+            style="ModeMask.TButton" if render_mode == "mask" else "ModeBox.TButton")
+        buttons["manual"].configure(
+            text="Anotación: ON" if brush_mode else "Anotación: OFF",
+            style="StateWarning.TButton" if brush_mode else "StateOff.TButton")
+
     print("\nControles: ESPACIO=pausa | s=stop | a/d=+-1 frame | z/x=+-10 | -/+=umbral | "
           "v=analisis on/off | m=modo mascara/bbox | e=anotar manual | [ ]=pincel | "
           "c=borrar marca | g=guardar marca | n/p=siguiente/anterior video | q=salir\n")
@@ -739,6 +894,9 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
             continue
 
         src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        if not np.isfinite(src_fps) or src_fps <= 0:
+            src_fps = 25.0
+        frame_interval = 1.0 / src_fps
         frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -786,25 +944,8 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
         win_w = max(1, int(canvas_w * win_scale))
         win_h = max(1, int((canvas_h + BAR_H) * win_scale))
 
-        if display_ok and not window_created:
-            try:
-                # WINDOW_NORMAL (no AUTOSIZE) a proposito: con trackbars en la
-                # ventana, dejar que una AUTOSIZE se auto-redimensione cuando
-                # llega una imagen de OTRO tamano (justo lo que pasa al
-                # cambiar de video, porque cada uno puede tener resolucion
-                # distinta) es un crash nativo conocido de OpenCV en Windows.
-                # Con NORMAL controlamos el tamano nosotros via resizeWindow.
-                cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-                window_created = True
-            except cv2.error:
-                print("No hay backend grafico disponible (ej. Kaggle). Desactivando ventana en vivo.")
-                display_ok = False
-
-        if display_ok and window_created:
-            # Se redimensiona EXPLICITAMENTE cada vez que cambia el video
-            # (en vez de dejar que imshow lo infiera solo), porque es justo
-            # esa auto-resize implicita con trackbars puestos la que crashea.
-            cv2.resizeWindow(window_name, win_w, win_h)
+        if display_ok:
+            ui["video_name"].config(text=video_label)
 
         cur_output_path = output_path
         if output_path and len(videos) > 1:
@@ -826,7 +967,7 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
         failed_reads = 0
         pending_step = 0
         pending_seek["target"] = None           # reset logico; el dict en si se conserva entre videos
-        scale_state = {"s": 1.0}
+        scale_state = {"x": 1.0, "y": 1.0}
         rects_state = {"r": []}
         scroll_offset = 0
         max_scroll = 0
@@ -835,6 +976,7 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
         erase_mode = False
         nav = {"action": None}   # None | "quit_app" | "next_video" | "prev_video"
         t_start = time.time()
+        next_frame_at = time.perf_counter()
 
         def read_and_process():
             nonlocal pos, read_idx, processed, failed_reads
@@ -899,7 +1041,8 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
             x0 = disp_w + SEP_W
             if not (x0 <= xc < x0 + disp_w):
                 return None
-            return (xc - x0) / scale, (yc - pad_top) / scale
+            return ((xc - x0) * frame_w / disp_w,
+                    (yc - pad_top) * frame_h / disp_h)
 
         def paint_at(fx, fy, erase):
             if pos < 0:
@@ -939,8 +1082,7 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
         def on_mouse(event, x, y, flags, param):
             nonlocal paused, pending_step, threshold, analysis_on, render_mode, \
                 scroll_offset, brush_mode, is_drawing, erase_mode
-            s = scale_state["s"]
-            xc, yc = x / s, y / s
+            xc, yc = x * scale_state["x"], y * scale_state["y"]
 
             if event == cv2.EVENT_LBUTTONDOWN:
                 if yc < canvas_h:
@@ -992,6 +1134,8 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
                             nav["action"] = "next_video"
                         elif action == "quit":
                             nav["action"] = "quit_app"
+                        elif action == "select_video":
+                            nav["action"] = "select_video"
                         break
 
             elif event == cv2.EVENT_RBUTTONDOWN:
@@ -1021,35 +1165,20 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
                         scroll_offset = min(max_scroll, scroll_offset + step)
 
         if display_ok:
-            # setMouseCallback SI se puede volver a llamar en cada video sin
-            # problema (solo reemplaza un puntero a funcion); lo que NO es
-            # seguro en Windows es recrear los TRACKBARS cada vez -> por eso
-            # estos se crean una unica vez, la primera pasada por aqui.
-            cv2.setMouseCallback(window_name, on_mouse)
-
-            if not trackbars_created:
-                def _on_threshold_trackbar(val):
-                    nonlocal threshold
-                    threshold = max(0.05, val / 100.0)
-
-                def _on_position_trackbar(val):
-                    if suppress_seek_cb["flag"]:
-                        return
-                    pending_seek["target"] = val
-
-                cv2.createTrackbar("Umbral x100", window_name, int(threshold * 100), 95,
-                                   _on_threshold_trackbar)
-                if max_total_frames > 0:
-                    cv2.createTrackbar("Posicion", window_name, start_frame_eff,
-                                       max(1, max_total_frames - 1), _on_position_trackbar)
-                else:
-                    print("Aviso: no se pudo determinar la duracion de los videos; "
-                          "el slider de posicion queda desactivado (usa los botones).")
-                trackbars_created = True
-            else:
-                # la ventana y los trackbars ya existian de un video anterior;
-                # solo se refleja el umbral vigente, nada se vuelve a crear.
-                cv2.setTrackbarPos("Umbral x100", window_name, int(round(threshold * 100)))
+            ui["image"].bind("<ButtonPress-1>",
+                lambda event: on_mouse(cv2.EVENT_LBUTTONDOWN, event.x, event.y, 0, None))
+            ui["image"].bind("<ButtonRelease-1>",
+                lambda event: on_mouse(cv2.EVENT_LBUTTONUP, event.x, event.y, 0, None))
+            ui["image"].bind("<ButtonPress-3>",
+                lambda event: on_mouse(cv2.EVENT_RBUTTONDOWN, event.x, event.y, 0, None))
+            ui["image"].bind("<ButtonRelease-3>",
+                lambda event: on_mouse(cv2.EVENT_RBUTTONUP, event.x, event.y, 0, None))
+            ui["image"].bind("<B1-Motion>",
+                lambda event: on_mouse(cv2.EVENT_MOUSEMOVE, event.x, event.y, 0, None))
+            ui["image"].bind("<B3-Motion>",
+                lambda event: on_mouse(cv2.EVENT_MOUSEMOVE, event.x, event.y, 0, None))
+            ui["image"].bind("<MouseWheel>", lambda event: on_mouse(
+                cv2.EVENT_MOUSEWHEEL, event.x, event.y, int(event.delta / 120 * 65536), None))
 
         def build_canvas(entry, prev_entry):
             nonlocal max_scroll, history_rects
@@ -1176,62 +1305,73 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
                 if not display_ok:
                     continue
 
-                bar, rects = draw_button_bar(canvas_w, paused, analysis_on, render_mode, brush_mode)
-                rects_state["r"] = rects
-                full = np.vstack([canvas, bar])
+                full = canvas
 
-                s = min(1.0, display_width / full.shape[1])
-                scale_state["s"] = s
-                shown = cv2.resize(full, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) if s < 1.0 else full
-                cv2.imshow(window_name, shown)
-
-                cv2.setTrackbarPos("Umbral x100", window_name, int(round(threshold * 100)))
-                if max_total_frames > 0:
-                    suppress_seek_cb["flag"] = True
-                    cv2.setTrackbarPos("Posicion", window_name, min(entry["idx"], max_total_frames - 1))
-                    suppress_seek_cb["flag"] = False
-
-                key = cv2.waitKey(30 if paused else 1) & 0xFF
-                if key in (ord("q"), 27):
+                scale = min(1.0, display_width / full.shape[1])
+                shown = cv2.resize(full, None, fx=scale, fy=scale,
+                                   interpolation=cv2.INTER_AREA) if scale < 1.0 else full
+                rgb = cv2.cvtColor(shown, cv2.COLOR_BGR2RGB)
+                photo = ImageTk.PhotoImage(Image.fromarray(rgb))
+                ui["image"].configure(image=photo)
+                ui["image"].image = photo
+                ui_root.update_idletasks()
+                scale_state["x"] = canvas_w / max(1, ui["image"].winfo_width())
+                scale_state["y"] = canvas_h / max(1, ui["image"].winfo_height())
+                ui_events["updating_position"] = True
+                ui["position"].configure(to=max(1, max_total_frames - 1))
+                ui["position"].set(min(entry["idx"], max(1, max_total_frames - 1)))
+                ui_events["updating_position"] = False
+                ui["threshold_var"].set(threshold * 100)
+                ui["threshold_label"].config(text=f"{threshold:.2f}")
+                ui["status"].config(text=f"Frame {entry['idx']}  |  {seconds_to_mmss(entry['idx'] / src_fps)}")
+                update_ui_buttons()
+                try:
+                    ui_root.update()
+                except tk.TclError:
                     nav["action"] = "quit_app"
-                elif key == 32:
+                action = ui_events["action"]
+                ui_events["action"] = None
+                if action in ("quit", "quit_app", "select_video", "next_video", "prev_video"):
+                    nav["action"] = "quit_app" if action == "quit" else action
+                elif action == "toggle":
                     paused = not paused
-                elif key == ord("s"):
+                elif action == "stop":
                     paused = True
                     pending_seek["target"] = 0
-                elif key in (ord("a"), 81):
-                    pending_step = -1
-                elif key in (ord("d"), 83):
-                    pending_step = 1
-                elif key == ord("z"):
-                    pending_step = -10
-                elif key == ord("x"):
-                    pending_step = 10
-                elif key in (ord("-"), ord("_")):
-                    threshold = max(0.05, threshold - 0.05)
-                elif key in (ord("+"), ord("=")):
-                    threshold = min(0.95, threshold + 0.05)
-                elif key == ord("v"):
+                elif action in ("back1", "back10", "fwd1", "fwd10"):
+                    pending_step = {"back1": -1, "back10": -10, "fwd1": 1, "fwd10": 10}[action]
+                elif action == "toggle_analysis":
                     analysis_on = not analysis_on
-                elif key == ord("m"):
+                elif action == "toggle_mode":
                     render_mode = "bbox" if render_mode == "mask" else "mask"
-                elif key == ord("e"):
+                elif action == "toggle_manual":
                     brush_mode = not brush_mode
                     if brush_mode:
                         paused = True
-                elif key == ord("["):
-                    brush_radius = max(3, brush_radius - 3)
-                elif key == ord("]"):
-                    brush_radius = min(60, brush_radius + 3)
-                elif key == ord("c"):
-                    if pos >= 0:
-                        manual_annotations.pop(cache[pos]["idx"], None)
-                elif key == ord("g"):
+                elif action == "save_manual":
                     save_manual_mark()
-                elif key == ord("n") and len(videos) > 1:
-                    nav["action"] = "next_video"
-                elif key == ord("p") and len(videos) > 1:
-                    nav["action"] = "prev_video"
+                elif action == "clear_manual" and pos >= 0:
+                    manual_annotations.pop(cache[pos]["idx"], None)
+                elif action == "brush_down":
+                    brush_radius = max(3, brush_radius - 3)
+                elif action == "brush_up":
+                    brush_radius = min(60, brush_radius + 3)
+                if ui_events["threshold"] is not None:
+                    threshold = max(0.05, min(0.95, ui_events["threshold"] / 100.0))
+                    ui_events["threshold"] = None
+                if ui_events["seek"] is not None:
+                    pending_seek["target"] = ui_events["seek"]
+                    ui_events["seek"] = None
+                update_ui_buttons()
+                if paused:
+                    time.sleep(0.03)
+                    next_frame_at = time.perf_counter()
+                else:
+                    now = time.perf_counter()
+                    next_frame_at = max(next_frame_at + frame_interval, now)
+                    delay = next_frame_at - now
+                    if delay > 0:
+                        time.sleep(delay)
         finally:
             cap.release()
             if writer is not None:
@@ -1243,7 +1383,7 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
         if failed_reads:
             print(f"Nota: {failed_reads} lecturas fallaron (cuadros corruptos del .avi) y se saltaron.")
 
-        if nav["action"] in (None, "quit_app"):
+        if nav["action"] in (None, "quit_app", "select_video"):
             break
         elif nav["action"] == "next_video":
             video_idx = (video_idx + 1) % len(videos)
@@ -1251,7 +1391,11 @@ def run_viewer(source, checkpoint_path, output_path=None, size=352,
             video_idx = (video_idx - 1) % len(videos)
 
     if display_ok:
-        cv2.destroyAllWindows()
+        try:
+            ui_root.update_idletasks()
+        except tk.TclError:
+            pass
+    return nav["action"] == "select_video"
 
 
 # =========================================================
@@ -1374,7 +1518,7 @@ def prompt_video_choice(videos):
 # =========================================================
 # 12b. SELECTOR GRAFICO (miniaturas, clic para elegir)
 # =========================================================
-def pick_video_gui(checkpoint=None, videos=None):
+def pick_video_gui(checkpoint=None, videos=None, root=None):
     """
     Ventana con una miniatura por video (el primer frame de cada uno) para
     elegir con un clic, en vez de escribir rutas o numeros en la consola.
@@ -1387,8 +1531,8 @@ def pick_video_gui(checkpoint=None, videos=None):
     - Si 'checkpoint' no viene dado, tambien se puede elegir el modelo
       (.pth) desde la misma ventana.
 
-    Devuelve (checkpoint_elegido, lista_de_videos, indice_inicial) o
-    (None, None, 0) si se cerro sin elegir nada, o si falta Pillow/tkinter
+    Devuelve (checkpoint_elegido, lista_de_videos, indice_inicial, root) o
+    (None, None, 0, root) si se cerro sin elegir nada, o si falta Pillow/tkinter
     (en ese caso avisa por consola y quien llama debe usar el modo texto).
     """
     try:
@@ -1398,32 +1542,55 @@ def pick_video_gui(checkpoint=None, videos=None):
     except Exception as e:
         print(f"Aviso: selector grafico no disponible ({e}). "
               f"Instala Pillow ('pip install Pillow') o usa --library con --no-display para el modo texto.")
-        return None, None, 0
+        return None, None, 0, root
 
     THUMB_W, THUMB_H = 220, 140
     COLS = 4
 
-    root = tk.Tk()
-    root.title("UACANet - elegir video")
-    root.configure(bg="#1e1e1e")
-    root.geometry("980x680")
+    root = root or tk.Tk()
+    for child in root.winfo_children():
+        child.destroy()
+    root.title("UACANet | Selección de video")
+    root.configure(bg="#151a1f")
+    root.geometry("1080x760")
+    from tkinter import ttk
+
+    style = ttk.Style(root)
+    style.theme_use("clam")
+    style.configure("Picker.TFrame", background="#151a1f")
+    style.configure("PickerPanel.TFrame", background="#20272e")
+    style.configure("Picker.TLabel", background="#151a1f", foreground="#e8edf1",
+                     font=("Segoe UI", 10))
+    style.configure("PickerTitle.TLabel", background="#151a1f", foreground="#f3f6f8",
+                     font=("Segoe UI Semibold", 17))
+    style.configure("PickerMuted.TLabel", background="#151a1f", foreground="#9ba8b3",
+                     font=("Segoe UI", 9))
+    style.configure("Picker.TButton", background="#303b44", foreground="#f3f6f8",
+                     borderwidth=0, padding=(11, 8), font=("Segoe UI", 9))
+    style.map("Picker.TButton", background=[("active", "#40515d")])
+    style.configure("PickerAccent.TButton", background="#167d82", foreground="white",
+                     borderwidth=0, padding=(11, 8), font=("Segoe UI Semibold", 9))
+    style.map("PickerAccent.TButton", background=[("active", "#19969a")])
 
     state = {"checkpoint": checkpoint, "videos": list(videos) if videos else [],
             "start_idx": 0, "confirmed": False}
     thumb_refs = []   # hay que mantener una referencia o Tk las "recoge" y la imagen se borra
 
-    top = tk.Frame(root, bg="#1e1e1e")
-    top.pack(fill="x", padx=12, pady=10)
+    shell = ttk.Frame(root, style="Picker.TFrame", padding=(18, 14))
+    shell.pack(fill="both", expand=True)
+    top = ttk.Frame(shell, style="Picker.TFrame")
+    top.pack(fill="x", pady=(0, 12))
 
-    ckpt_label = tk.Label(top, text="", bg="#1e1e1e", fg="#dddddd", anchor="w",
-                          font=("Segoe UI", 10))
-    ckpt_label.pack(side="left", fill="x", expand=True)
+    ttk.Label(top, text="Seleccionar video", style="PickerTitle.TLabel").pack(side="left")
+
+    ckpt_label = ttk.Label(top, text="", style="PickerMuted.TLabel", anchor="w")
+    ckpt_label.pack(side="left", fill="x", expand=True, padx=20)
 
     def refresh_ckpt_label():
         if state["checkpoint"]:
-            ckpt_label.config(text=f"Modelo: {os.path.basename(state['checkpoint'])}")
+            ckpt_label.config(text=f"Modelo activo  ·  {os.path.basename(state['checkpoint'])}")
         else:
-            ckpt_label.config(text="Modelo: (sin elegir)")
+            ckpt_label.config(text="Selecciona un modelo .pth")
 
     def choose_checkpoint():
         path = filedialog.askopenfilename(
@@ -1433,18 +1600,19 @@ def pick_video_gui(checkpoint=None, videos=None):
             state["checkpoint"] = path
             refresh_ckpt_label()
 
-    tk.Button(top, text="Elegir modelo (.pth)...", command=choose_checkpoint).pack(side="right")
+    ttk.Button(top, text="Elegir modelo .pth", style="Picker.TButton",
+               command=choose_checkpoint).pack(side="right")
     refresh_ckpt_label()
 
-    status = tk.Label(root, text="", bg="#1e1e1e", fg="#9fd3ff", font=("Segoe UI", 9))
-    status.pack(fill="x", padx=12)
+    status = ttk.Label(shell, text="", style="PickerMuted.TLabel")
+    status.pack(fill="x", pady=(0, 6))
 
     # --- grilla de miniaturas, con scroll ---
-    container = tk.Frame(root, bg="#1e1e1e")
-    container.pack(fill="both", expand=True, padx=12, pady=10)
-    gcanvas = tk.Canvas(container, bg="#1e1e1e", highlightthickness=0)
-    scrollbar = tk.Scrollbar(container, orient="vertical", command=gcanvas.yview)
-    grid_frame = tk.Frame(gcanvas, bg="#1e1e1e")
+    container = ttk.Frame(shell, style="PickerPanel.TFrame", padding=5)
+    container.pack(fill="both", expand=True, pady=(0, 10))
+    gcanvas = tk.Canvas(container, bg="#20272e", highlightthickness=0)
+    scrollbar = ttk.Scrollbar(container, orient="vertical", command=gcanvas.yview)
+    grid_frame = tk.Frame(gcanvas, bg="#20272e")
     grid_frame.bind("<Configure>", lambda e: gcanvas.configure(scrollregion=gcanvas.bbox("all")))
     gcanvas.create_window((0, 0), window=grid_frame, anchor="nw")
     gcanvas.configure(yscrollcommand=scrollbar.set)
@@ -1473,7 +1641,13 @@ def pick_video_gui(checkpoint=None, videos=None):
     def on_pick(idx):
         state["start_idx"] = idx
         state["confirmed"] = True
-        root.destroy()
+        root.quit()
+
+    def on_close():
+        state["confirmed"] = False
+        root.quit()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
 
     def populate():
         for w in grid_frame.winfo_children():
@@ -1482,23 +1656,30 @@ def pick_video_gui(checkpoint=None, videos=None):
         vids = state["videos"]
         if not vids:
             tk.Label(grid_frame, text="Elige una carpeta o un video para empezar.",
-                    bg="#1e1e1e", fg="#999999", font=("Segoe UI", 11)).grid(row=0, column=0, padx=20, pady=20)
+                    bg="#20272e", fg="#b7c1c8", font=("Segoe UI", 11)).grid(row=0, column=0, padx=20, pady=20)
             return
         for i, path in enumerate(vids):
-            status.config(text=f"Generando miniatura {i + 1}/{len(vids)}...")
-            root.update_idletasks()
-            thumb = make_thumbnail(path)
-            thumb_refs.append(thumb)
-            cell = tk.Frame(grid_frame, bg="#1e1e1e")
+            cell = tk.Frame(grid_frame, bg="#20272e")
             cell.grid(row=i // COLS, column=i % COLS, padx=10, pady=10)
-            btn = tk.Button(cell, image=thumb, command=lambda i=i: on_pick(i),
-                            bd=2, relief="groove", cursor="hand2")
-            btn.pack()
-            name = os.path.basename(path)
-            if len(name) > 30:
-                name = name[:27] + "..."
-            tk.Label(cell, text=name, bg="#1e1e1e", fg="#dddddd", font=("Segoe UI", 9)).pack()
-        status.config(text=f"{len(vids)} video(s) — clic en uno para abrirlo.")
+            if isinstance(path, int):
+                btn = ttk.Button(cell, text="CÁMARA\nEn vivo", style="PickerAccent.TButton",
+                                 command=lambda i=i: on_pick(i))
+                btn.pack(fill="x", ipady=42, pady=(0, 5))
+                name = f"Cámara {path}"
+            else:
+                status.config(text=f"Generando miniatura {i + 1}/{len(vids)}...")
+                root.update_idletasks()
+                thumb = make_thumbnail(path)
+                thumb_refs.append(thumb)
+                btn = tk.Button(cell, image=thumb, command=lambda i=i: on_pick(i),
+                                bd=0, highlightthickness=2, highlightbackground="#52616a",
+                                activebackground="#167d82", cursor="hand2")
+                btn.pack()
+                name = os.path.basename(path)
+                if len(name) > 30:
+                    name = name[:27] + "..."
+            tk.Label(cell, text=name, bg="#20272e", fg="#e8edf1", font=("Segoe UI", 9)).pack(pady=(5, 0))
+        status.config(text=f"{len(vids)} videos disponibles")
 
     def choose_folder():
         folder = filedialog.askdirectory(title="Selecciona la carpeta con los videos")
@@ -1519,17 +1700,23 @@ def pick_video_gui(checkpoint=None, videos=None):
             state["videos"] = [path]
             populate()
 
-    browse = tk.Frame(root, bg="#1e1e1e")
-    browse.pack(fill="x", padx=12, pady=(0, 10))
-    tk.Button(browse, text="Elegir carpeta de videos...", command=choose_folder).pack(side="left")
-    tk.Button(browse, text="Elegir un solo video...", command=choose_single_file).pack(side="left", padx=10)
+    browse = ttk.Frame(shell, style="Picker.TFrame")
+    browse.pack(fill="x")
+    ttk.Button(browse, text="Abrir carpeta", style="Picker.TButton",
+               command=choose_folder).pack(side="left")
+    ttk.Button(browse, text="Abrir video", style="Picker.TButton",
+               command=choose_single_file).pack(side="left", padx=8)
+    ttk.Button(browse, text="Capturar con cámara", style="PickerAccent.TButton",
+               command=lambda: (state.update(videos=[0]), on_pick(0))).pack(side="left", padx=8)
+    ttk.Label(browse, text="Selecciona una miniatura para iniciar el análisis",
+              style="PickerMuted.TLabel").pack(side="right", padx=4)
 
     populate()
     root.mainloop()
 
     if not state["confirmed"] or not state["videos"]:
-        return None, None, 0
-    return state["checkpoint"], state["videos"], state["start_idx"]
+        return None, None, 0, root
+    return state["checkpoint"], state["videos"], state["start_idx"], root
 
 
 # =========================================================
@@ -1571,6 +1758,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     videos = None
+    app_root = None
     if args.library:
         videos = list_videos_in_dir(args.library)
         if not videos:
@@ -1582,7 +1770,7 @@ if __name__ == "__main__":
             else:
                 # el selector grafico ya recibe la carpeta cargada: solo hay
                 # que elegir cual abrir (o cambiar de carpeta ahi mismo)
-                ckpt_gui, videos_gui, idx_gui = pick_video_gui(args.checkpoint, videos)
+                ckpt_gui, videos_gui, idx_gui, app_root = pick_video_gui(args.checkpoint, videos)
                 if videos_gui:
                     videos = videos_gui
                     start_idx = idx_gui
@@ -1599,7 +1787,7 @@ if __name__ == "__main__":
         if args.no_display or args.no_picker:
             parser.error("Indica --source (un video o camara) o --library (una carpeta con varios videos). "
                          "El selector grafico no aplica con --no-display/--no-picker.")
-        ckpt_gui, videos_gui, idx_gui = pick_video_gui(args.checkpoint)
+        ckpt_gui, videos_gui, idx_gui, app_root = pick_video_gui(args.checkpoint)
         if not videos_gui:
             raise SystemExit("No se eligio ningun video; se cierra el programa.")
         if ckpt_gui and not args.checkpoint:
@@ -1629,12 +1817,45 @@ if __name__ == "__main__":
         display_width=args.display_width, display_height=args.display_height,
         show_panel=not args.no_panel,
         video_height=args.video_height, panel_width=args.panel_width,
-        history_dir=args.history_dir, playlist=videos,
+        history_dir=args.history_dir, playlist=videos, tk_root=app_root,
+        tk_root_ref={"root": app_root},
     )
+
+    root_ref = common["tk_root_ref"]
+    selection_state = {"videos": list(videos) if videos else [chosen_source]}
+
+    def pick_another_video():
+        selected = {"valid": False}
+        ckpt_gui, videos_gui, idx_gui, picker_root = pick_video_gui(
+            args.checkpoint, selection_state["videos"], root=root_ref.get("root"))
+        if videos_gui:
+            selection_state["videos"] = videos_gui
+            if ckpt_gui:
+                args.checkpoint = ckpt_gui
+                common["checkpoint_path"] = ckpt_gui
+            common["source"] = videos_gui[idx_gui]
+            common["playlist"] = videos_gui
+            common["tk_root"] = picker_root
+            root_ref["root"] = picker_root
+            selected["valid"] = True
+        else:
+            try:
+                picker_root.destroy()
+            except Exception:
+                pass
+        return selected["valid"]
+
+    def play_with_picker(start_frame=None, end_frame=None):
+        while True:
+            return_to_picker = run_viewer(start_frame=start_frame, end_frame=end_frame, **common)
+            if not return_to_picker or not pick_another_video():
+                break
+            start_frame = None
+            end_frame = None
 
     if args.interactive:
         start_f, end_f = prompt_time_range(chosen_source)
-        run_viewer(start_frame=start_f, end_frame=end_f, **common)
+        play_with_picker(start_frame=start_f, end_frame=end_f)
     elif frame_index is not None:
         process_single_frame(
             source=chosen_source, checkpoint_path=args.checkpoint, frame_index=frame_index,
@@ -1646,6 +1867,6 @@ if __name__ == "__main__":
         start_f = parse_timecode(args.start_time, fps)
         end_f = parse_timecode(args.end_time, fps) if args.end_time else None
         print(f"Rango: frame {start_f}" + (f" -> {end_f}" if end_f else ""))
-        run_viewer(start_frame=start_f, end_frame=end_f, **common)
+        play_with_picker(start_frame=start_f, end_frame=end_f)
     else:
-        run_viewer(**common)
+        play_with_picker()
