@@ -1,0 +1,26 @@
+﻿# Entornos de Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Videos y datos
+*.avi
+*.mp4
+*.mov
+*.mkv
+*.zip
+
+# Historial y resultados
+historial/
+outputs/
+results/
+temp/
+tmp/
+
+# Archivos temporales
+*.log
+.DS_Store
+Thumbs.db
+
+best_model.pth

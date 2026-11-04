@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Visor de colonoscopia · UACANet</title>
+<style>
+  :root {
+    --bg:#13181c; --panel:#1c242a; --line:#2f3b43; --text:#e9eef1; --muted:#93a1ab;
+    --accent:#2fb5a8; --warn:#e8b04a; --ok:#6fcf97;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 "Segoe UI",system-ui,sans-serif; }
+  body { padding:env(safe-area-inset-top,0) 14px env(safe-area-inset-bottom,0); }
+  header { display:flex; align-items:baseline; gap:16px; padding:14px 0 10px; }
+  h1 { font-size:18px; margin:0; font-weight:600; }
+  #status { color:var(--muted); font-size:13px; }
+  main { display:grid; grid-template-columns:1fr 280px; gap:12px; }
+  @media (max-width:900px){ main{grid-template-columns:1fr;} }
+  .views { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  @media (max-width:700px){ .views{grid-template-columns:1fr;} }
+  figure { margin:0; background:#000; border:1px solid var(--line); border-radius:6px; overflow:hidden; position:relative; }
+  figcaption { position:absolute; top:6px; left:8px; font-weight:600; text-shadow:0 1px 3px #000; }
+  video,canvas#out { width:100%; display:block; background:#000; }
+  .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:var(--panel);
+         border:1px solid var(--line); border-radius:6px; padding:10px; margin-top:8px; }
+  button,label.btn { background:#2d3a43; color:var(--text); border:0; border-radius:5px; padding:8px 12px;
+         font:inherit; cursor:pointer; }
+  button:hover,label.btn:hover { background:#3b4b56; }
+  button:focus-visible,input:focus-visible,label.btn:focus-within { outline:2px solid var(--accent); outline-offset:2px; }
+  button.on { background:#25574f; }
+  input[type=range] { accent-color:var(--accent); }
+  #thr { width:160px; }
+  aside { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:10px;
+          max-height:80vh; overflow:auto; }
+  aside h2 { font-size:14px; margin:0 0 8px; }
+  .find { display:flex; gap:8px; align-items:center; padding:6px 0; border-top:1px solid var(--line); cursor:pointer; }
+  .find img { width:96px; height:64px; object-fit:cover; border-radius:3px; }
+  .empty { color:var(--muted); }
+  #badge { margin-left:auto; padding:4px 10px; border-radius:99px; background:#2d3a43; }
+  #badge.hit { background:#7a2f3a; }
+  button.warn { background:#765d20; }
+  a.btn { background:#2d3a43; color:var(--text); border-radius:5px; padding:8px 12px; text-decoration:none; }
+  a.btn:hover { background:#3b4b56; }
+  .tag { font-weight:600; } .tag.manual { color:#ffd700; } .tag.automatico { color:var(--ok); }
+  [hidden] { display:none !important; }
+  .muted { color:var(--muted); }
+  #login { max-width:340px; margin:12vh auto 0; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:24px; }
+  #login form { display:grid; gap:8px; margin-top:12px; }
+  #login input { background:#10161a; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:9px; font:inherit; }
+  #login button { margin-top:8px; background:#167d82; }
+  #login-err { color:#ff8a8a; min-height:1.2em; margin:4px 0 0; }
+  #logout { margin-left:6px; }
+</style>
+</head>
+<body>
+<section id="login" hidden>
+  <h1>Visor de colonoscopia</h1>
+  <p class="muted">Inicia sesión con tu cuenta institucional.</p>
+  <form id="login-form">
+    <label for="em">Correo</label>
+    <input id="em" type="email" autocomplete="username" required>
+    <label for="pw">Contraseña</label>
+    <input id="pw" type="password" autocomplete="current-password" required>
+    <button type="submit" id="login-btn">Entrar</button>
+    <p id="login-err" role="alert"></p>
+  </form>
+</section>
+<div id="app" hidden>
+<header>
+  <h1>Visor de colonoscopia</h1>
+  <span id="status">Sin conexión</span>
+  <span id="badge">Sin detección</span>
+  <span id="who" class="muted"></span><button id="logout">Cerrar sesión</button>
+</header>
+
+<main>
+  <section>
+    <div class="views">
+      <figure><figcaption>Original</figcaption><video id="vid" playsinline muted controls></video></figure>
+      <figure><figcaption>Segmentación</figcaption><canvas id="out"></canvas></figure>
+    </div>
+    <div class="bar">
+      <label class="btn">Abrir video<input id="file" type="file" accept="video/*" hidden></label>
+      <button id="cam">Usar cámara</button>
+      <button id="analysis" class="on">Análisis: activado</button>
+      <button id="mode">Modo: máscara</button>
+      <button id="annot">Anotación: desactivada</button>
+      <button id="save">Guardar marca</button>
+      <button id="clear">Borrar marca</button>
+      <label>Pincel <input id="brush" type="range" min="3" max="60" value="15"></label>
+      <button id="dl">Descargar CSV</button>
+      <label>Umbral <input id="thr" type="range" min="5" max="95" value="50"> <span id="thrv">0.50</span></label>
+    </div>
+  </section>
+  <aside>
+    <h2>Hallazgos (<span id="count">0</span>)</h2>
+    <p id="saved" class="empty" aria-live="polite"></p>
+    <div id="list"><p class="empty">Aún no hay hallazgos. Se registran cuando aparece un pólipo.</p></div>
+  </aside>
+</main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.58.0/dist/umd/supabase.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const vid = $("vid"), out = $("out"), ctx = out.getContext("2d", { willReadFrequently: true });
+const grab = document.createElement("canvas"), gctx = grab.getContext("2d", { willReadFrequently: true });
+const maskC = document.createElement("canvas"), mctx = maskC.getContext("2d", { willReadFrequently: true });
+const tmp = document.createElement("canvas");
+const FPS = 25, MAX_W = 640;   // FPS solo se usa para convertir tiempo <-> número de frame
+
+let ws, seq = 0, inflight = false, analysis = true, mode = "mask", thr = 0.5;
+let lastProb = null, lastFrame = null, hadDetection = false, findings = [];
+let videoKey = "", sentKey = 0, shownKey = 0, lastSent = -1;
+let annotate = false, brush = 15, painting = null, lastPt = null;
+const marks = new Map();          // frame -> canvas con la marca manual (blanco = marcado)
+
+const fmt = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(2).padStart(5, "0")}`;
+const blobOf = (c, t) => new Promise(r => c.toBlob(r, t, 0.85));
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = async () => {
+    const t = await token();
+    if (!t) { ws.close(); return; }
+    ws.send(JSON.stringify({ token: t })); wsAuthed = true;
+    $("status").textContent = "Conectado";
+  };
+  ws.onclose = ev => {
+    wsAuthed = false; inflight = false;
+    if (!session) return;
+    if (ev.code === 4401) { sb.auth.signOut(); return; }
+    $("status").textContent = "Desconectado, reintentando…"; setTimeout(connect, 2000);
+  };
+  ws.onmessage = async ev => {
+    const bmp = await createImageBitmap(new Blob([ev.data.slice(4)], { type: "image/png" }));
+    maskC.width = bmp.width; maskC.height = bmp.height;
+    mctx.drawImage(bmp, 0, 0);
+    lastProb = mctx.getImageData(0, 0, bmp.width, bmp.height);
+    lastFrame = gctx.getImageData(0, 0, grab.width, grab.height);
+    shownKey = sentKey;
+    inflight = false;
+    const r = render();
+    if (r.detected && !hadDetection && !findings.some(f => f.key === shownKey && f.tipo === "automatico"))
+      pushFinding({ tipo: "automatico", key: shownKey, box: r.box });
+    hadDetection = r.detected;
+  };
+}
+
+function snapshot() {
+  const s = Math.min(1, MAX_W / vid.videoWidth);
+  grab.width = Math.round(vid.videoWidth * s); grab.height = Math.round(vid.videoHeight * s);
+  gctx.drawImage(vid, 0, 0, grab.width, grab.height);
+}
+
+function loop() {
+  const changed = vid.currentTime !== lastSent;
+  if (vid.readyState >= 2 && vid.videoWidth && (!vid.paused || changed)) {
+    if (!analysis) {                       // sin análisis: solo se muestra el frame (y se pueden hacer marcas)
+      lastSent = vid.currentTime; snapshot();
+      lastFrame = gctx.getImageData(0, 0, grab.width, grab.height); lastProb = null;
+      shownKey = Math.round(vid.currentTime * FPS); render();
+    } else if (ws && ws.readyState === 1 && wsAuthed && !inflight) {
+      lastSent = vid.currentTime; sentKey = Math.round(vid.currentTime * FPS);
+      snapshot(); inflight = true;
+      grab.toBlob(async b => {
+        const jpeg = new Uint8Array(await b.arrayBuffer());
+        const msg = new Uint8Array(4 + jpeg.length);
+        new DataView(msg.buffer).setUint32(0, ++seq);
+        msg.set(jpeg, 4);
+        if (ws.readyState === 1) ws.send(msg); else inflight = false;
+      }, "image/jpeg", 0.85);
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+function drawMark(c, m, w, h) {
+  tmp.width = w; tmp.height = h;
+  const t = tmp.getContext("2d");
+  t.fillStyle = "#ffd700"; t.fillRect(0, 0, w, h);
+  t.globalCompositeOperation = "destination-in"; t.drawImage(m, 0, 0, w, h);
+  c.globalAlpha = 0.5; c.drawImage(tmp, 0, 0); c.globalAlpha = 1;
+}
+
+function render() {
+  if (!lastFrame) return { detected: false, box: null };
+  const w = lastFrame.width, h = lastFrame.height;
+  out.width = w; out.height = h;
+  const img = new ImageData(new Uint8ClampedArray(lastFrame.data), w, h);
+  let hits = 0, minX = w, minY = h, maxX = 0, maxY = 0;
+  if (lastProb && analysis) {
+    const T = thr * 255, d = img.data, p = lastProb.data;
+    for (let i = 0, px = 0; i < d.length; i += 4, px++) {
+      if (p[i] > T) {
+        hits++;
+        const x = px % w, y = (px / w) | 0;
+        if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y;
+        if (mode === "mask") { d[i] = d[i] * .55 + 255 * .45; d[i + 1] *= .55; d[i + 2] *= .55; }
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const detected = hits > w * h * 2e-4;
+  if (mode === "bbox" && detected) {
+    ctx.strokeStyle = "#ff3b3b"; ctx.lineWidth = 3;
+    ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+  }
+  const m = marks.get(shownKey);
+  if (m) drawMark(ctx, m, w, h);
+  $("badge").textContent = detected ? "Pólipo detectado" : "Sin detección";
+  $("badge").classList.toggle("hit", detected);
+  return { detected, box: detected ? [minX, minY, maxX - minX, maxY - minY] : null };
+}
+
+/* ---------- anotación manual ---------- */
+function paintAt(ev) {
+  if (!lastFrame) return;
+  let m = marks.get(shownKey);
+  if (!m) { m = document.createElement("canvas"); m.width = out.width; m.height = out.height; marks.set(shownKey, m); }
+  const r = out.getBoundingClientRect(), k = m.width / r.width;
+  const x = (ev.clientX - r.left) * k, y = (ev.clientY - r.top) * k;
+  const c = m.getContext("2d");
+  c.globalCompositeOperation = painting === "erase" ? "destination-out" : "source-over";
+  c.strokeStyle = "#fff"; c.lineWidth = 2 * brush * m.width / out.width; c.lineCap = "round";
+  const [x0, y0] = lastPt || [x, y];
+  c.beginPath(); c.moveTo(x0, y0); c.lineTo(x, y); c.stroke();
+  lastPt = [x, y];
+  render();
+}
+out.addEventListener("pointerdown", e => {
+  if (!annotate) return;
+  out.setPointerCapture(e.pointerId);
+  painting = e.button === 2 ? "erase" : "draw"; lastPt = null; paintAt(e);
+});
+out.addEventListener("pointermove", e => { if (painting) paintAt(e); });
+["pointerup", "pointercancel"].forEach(t => out.addEventListener(t, () => { painting = null; lastPt = null; }));
+out.addEventListener("contextmenu", e => { if (annotate) e.preventDefault(); });
+
+function setAnnotate(on) {
+  annotate = on;
+  if (on) vid.pause();
+  $("annot").classList.toggle("warn", on);
+  $("annot").textContent = "Anotación: " + (on ? "activada" : "desactivada");
+  out.style.cursor = on ? "crosshair" : "default"; out.style.touchAction = on ? "none" : "auto";
+}
+
+function maskBox(m) {
+  const d = m.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, m.width, m.height).data;
+  let x0 = m.width, y0 = m.height, x1 = -1, y1 = -1;
+  for (let i = 3, px = 0; i < d.length; i += 4, px++) if (d[i] > 0) {
+    const x = px % m.width, y = (px / m.width) | 0;
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  if (x1 < 0) return null;
+  const k = out.width / m.width;
+  return [x0 * k, y0 * k, (x1 - x0 + 1) * k, (y1 - y0 + 1) * k];
+}
+
+async function saveMark() {
+  const m = marks.get(shownKey), box = m && maskBox(m);
+  if (!box) { setSaved("No hay marca en este frame."); return; }
+  const mc = document.createElement("canvas"); mc.width = m.width; mc.height = m.height;
+  const c = mc.getContext("2d"); c.fillStyle = "#000"; c.fillRect(0, 0, mc.width, mc.height); c.drawImage(m, 0, 0);
+  pushFinding({ tipo: "manual", key: shownKey, box, maskCanvas: mc });
+}
+function clearMark() { marks.delete(shownKey); render(); }
+
+/* ---------- historial (servidor) ---------- */
+function thumbOf(box) {
+  const [x, y, bw, bh] = box || [0, 0, out.width, out.height];
+  const mx = bw * 0.6 + 15, my = bh * 0.6 + 15;
+  const x0 = Math.max(0, x - mx), y0 = Math.max(0, y - my);
+  const x1 = Math.min(out.width, x + bw + mx), y1 = Math.min(out.height, y + bh + my);
+  const t = document.createElement("canvas"); t.width = 192; t.height = 128;
+  t.getContext("2d").drawImage(out, x0, y0, x1 - x0, y1 - y0, 0, 0, 192, 128);
+  return t;
+}
+
+async function pushFinding({ tipo, key, box, maskCanvas }) {
+  if (!videoKey) return;
+  const thumb = thumbOf(box);
+  findings = findings.filter(f => !(f.key === key && f.tipo === tipo));
+  findings.push({ key, tipo, src: thumb.toDataURL("image/jpeg", 0.8) });
+  findings.sort((a, b) => a.key - b.key);
+  renderList();
+  const fd = new FormData();
+  fd.append("video", videoKey); fd.append("frame", key);
+  fd.append("tiempo", fmt(key / FPS)); fd.append("tipo", tipo);
+  fd.append("thumb", await blobOf(thumb, "image/jpeg"), "t.jpg");
+  if (maskCanvas) fd.append("mask", await blobOf(maskCanvas, "image/png"), "m.png");
+  try {
+    const r = await api("/api/findings", { method: "POST", body: fd });
+    if (!r.ok) throw new Error();
+    setSaved(tipo === "manual" ? "Marca guardada en el servidor." : "");
+  } catch { setSaved("No se pudo guardar en el servidor."); }
+}
+
+function setSaved(t) { $("saved").textContent = t; }
+
+function renderList() {
+  $("count").textContent = findings.length;
+  const list = $("list"); list.innerHTML = "";
+  if (!findings.length) {
+    list.innerHTML = '<p class="empty">Aún no hay hallazgos. Se registran cuando aparece un pólipo o al guardar una marca.</p>';
+    return;
+  }
+  for (const f of findings) {
+    const row = document.createElement("div"); row.className = "find";
+    row.innerHTML = `<img alt="Hallazgo"><span><b class="tag ${f.tipo}">${f.tipo === "manual" ? "Manual" : "Automático"}</b><br>${fmt(f.key / FPS)}</span>`;
+    row.querySelector("img").src = f.src;
+    row.onclick = () => { vid.pause(); vid.currentTime = f.key / FPS; };
+    list.appendChild(row);
+  }
+}
+
+function alphaFromGray(bmp) {
+  const c = document.createElement("canvas"); c.width = bmp.width; c.height = bmp.height;
+  const x = c.getContext("2d", { willReadFrequently: true }); x.drawImage(bmp, 0, 0);
+  const id = x.getImageData(0, 0, c.width, c.height), d = id.data;
+  for (let i = 0; i < d.length; i += 4) { d[i + 3] = d[i]; d[i] = d[i + 1] = d[i + 2] = 255; }
+  x.putImageData(id, 0, 0);
+  return c;
+}
+
+async function openSource(key) {
+  videoKey = key; marks.clear(); findings = []; hadDetection = false; lastSent = -1; setSaved("");
+  try {
+    const rows = await (await api("/api/findings?video=" + encodeURIComponent(key))).json();
+    for (const row of rows) {
+      findings.push({ key: row.frame, tipo: row.tipo, src: await blobUrl(row.thumb) });
+      if (row.mask) marks.set(row.frame, alphaFromGray(await createImageBitmap(await (await api(row.mask)).blob())));
+    }
+    if (rows.length) setSaved(`Se cargaron ${rows.length} hallazgo(s) de una sesión anterior.`);
+  } catch { /* sin historial previo */ }
+  renderList();
+}
+
+/* ---------- controles ---------- */
+let loadTok = 0, currentVideoUrl = null;
+const FORMAT_HELP = "El navegador no pudo reproducir el video. Se recomienda MP4/H.264/yuv420p.";
+
+$("file").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  e.target.value = ""; // permite volver a elegir el mismo archivo
+  stopCam();
+  const tok = ++loadTok;
+  vid.pause(); vid.removeAttribute("src"); vid.load();
+  if (currentVideoUrl) { URL.revokeObjectURL(currentVideoUrl); currentVideoUrl = null; }
+  $("status").textContent = `Preparando ${f.name}: convirtiendo a MP4 compatible…`;
+
+  try {
+    const form = new FormData();
+    form.append("file", f, f.name);
+    const response = await api("/api/video/compatible", { method: "POST", body: form });
+    if (!response.ok) {
+      let message = `Error HTTP ${response.status}`;
+      try { message = (await response.json()).detail || message; } catch {}
+      throw new Error(message);
+    }
+    const converted = await response.blob();
+    if (tok !== loadTok) return;
+    currentVideoUrl = URL.createObjectURL(converted);
+    vid.src = currentVideoUrl;
+    vid.load();
+    $("status").textContent = `Video convertido. Cargando ${f.name}…`;
+    vid.play().catch(() => {});
+    await openSource(`${f.name}_${f.size}`);
+    setTimeout(() => {
+      if (tok !== loadTok || vid.srcObject || !vid.getAttribute("src")) return;
+      if (vid.readyState < 2 || !vid.videoWidth)
+        $("status").textContent = `El MP4 convertido todavía no entrega fotogramas (readyState ${vid.readyState}).`;
+    }, 15000);
+  } catch (err) {
+    if (tok === loadTok) $("status").textContent = `No se pudo preparar el video: ${err.message}`;
+  }
+};
+vid.addEventListener("error", () => {
+  if (!vid.error || vid.srcObject || !vid.getAttribute("src")) return;
+  $("status").textContent = vid.error.code === 4
+    ? "El navegador no soporta este formato de video. " + FORMAT_HELP
+    : "No se pudo decodificar el video (código " + vid.error.code + "). " + FORMAT_HELP;
+});
+vid.addEventListener("loadedmetadata", () => {
+  if (vid.srcObject || !vid.getAttribute("src")) return;
+  if (!vid.videoWidth) $("status").textContent = "El navegador abrió el archivo pero no puede mostrar la imagen (¿H.265/HEVC?). " + FORMAT_HELP;
+  else $("status").textContent = `Video cargado (${vid.videoWidth}×${vid.videoHeight})`;
+});
+$("cam").onclick = async () => {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ video: { width: 1280 }, audio: false });
+    vid.removeAttribute("src"); vid.srcObject = s; vid.play(); openSource("camara");
+  } catch { $("status").textContent = "No se pudo abrir la cámara (¿HTTPS y permisos?)"; }
+};
+function stopCam() { loadTok++; if (vid.srcObject) { vid.srcObject.getTracks().forEach(t => t.stop()); vid.srcObject = null; } }
+
+$("analysis").onclick = e => {
+  analysis = !analysis; lastSent = -1; lastProb = null; hadDetection = false;
+  e.target.classList.toggle("on", analysis);
+  e.target.textContent = "Análisis: " + (analysis ? "activado" : "desactivado");
+};
+$("mode").onclick = e => { mode = mode === "mask" ? "bbox" : "mask"; e.target.textContent = "Modo: " + (mode === "mask" ? "máscara" : "caja"); render(); };
+$("thr").oninput = e => { thr = e.target.value / 100; $("thrv").textContent = thr.toFixed(2); render(); };
+$("annot").onclick = () => setAnnotate(!annotate);
+$("save").onclick = saveMark;
+$("clear").onclick = clearMark;
+$("brush").oninput = e => { brush = +e.target.value; };
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" && e.target.type === "text") return;
+  if (e.code === "Space") { e.preventDefault(); vid.paused ? vid.play() : vid.pause(); }
+  else if (e.key === "a") vid.currentTime -= 1 / FPS;
+  else if (e.key === "d") vid.currentTime += 1 / FPS;
+  else if (e.key === "e") setAnnotate(!annotate);
+  else if (e.key === "g") saveMark();
+  else if (e.key === "c") clearMark();
+  else if (e.key === "[") { brush = Math.max(3, brush - 3); $("brush").value = brush; }
+  else if (e.key === "]") { brush = Math.min(60, brush + 3); $("brush").value = brush; }
+});
+
+$("dl").onclick = async () => {
+  if (!videoKey) return;
+  const r = await api(`/api/findings/file?video=${encodeURIComponent(videoKey)}&name=hallazgos.csv`);
+  if (!r.ok) { setSaved("Aún no hay historial para descargar."); return; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(await r.blob()); a.download = "hallazgos.csv"; a.click();
+};
+
+/* ---------- sesión (Supabase) ---------- */
+let sb = null, session = null, wsAuthed = false, started = false;
+async function token() { const { data } = await sb.auth.getSession(); return data.session ? data.session.access_token : null; }
+async function api(url, opts = {}) {
+  return fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: "Bearer " + await token() } });
+}
+async function blobUrl(url) { return URL.createObjectURL(await (await api(url)).blob()); }
+
+function applySession() {
+  $("login").hidden = !!session; $("app").hidden = !session;
+  if (session) {
+    $("who").textContent = session.user.email;
+    if (!started) { started = true; loop(); }
+    if (!ws || ws.readyState > 1) connect();
+  } else {
+    if (ws) ws.close();
+    stopCam(); vid.pause(); vid.removeAttribute("src"); vid.load();
+    if (currentVideoUrl) { URL.revokeObjectURL(currentVideoUrl); currentVideoUrl = null; }
+    videoKey = ""; findings = []; marks.clear(); lastFrame = lastProb = null; renderList();
+  }
+}
+
+let cfg = null;
+function loginMsg(error) {
+  const m = (error.message || "").toLowerCase();
+  if (m.includes("invalid login")) return "Correo o contraseña incorrectos.";
+  if (m.includes("not confirmed")) return "El correo aún no está confirmado en Supabase.";
+  if (m.includes("failed to fetch") || m.includes("networkerror") || m.includes("load failed") || error.name === "AuthRetryableFetchError")
+    return "No se pudo conectar con Supabase (" + (cfg && cfg.supabase_url) + "). Revisa SUPABASE_URL en el servidor, " +
+           "que el proyecto no esté pausado y que tu red/antivirus/adblock no lo bloqueen.";
+  return "Error: " + error.message + (error.status ? " (" + error.status + ")" : "");
+}
+$("login-form").onsubmit = async e => {
+  e.preventDefault();
+  $("login-btn").disabled = true; $("login-err").textContent = "";
+  try {
+    const { error } = await sb.auth.signInWithPassword({ email: $("em").value.trim(), password: $("pw").value });
+    if (error) { console.error("Login Supabase:", error); $("login-err").textContent = loginMsg(error); }
+  } catch (err) {
+    console.error("Login Supabase:", err); $("login-err").textContent = loginMsg(err);
+  }
+  $("pw").value = ""; $("login-btn").disabled = false;
+};
+$("logout").onclick = () => sb.auth.signOut();
+
+(async () => {
+  $("login").hidden = false;
+  try { cfg = await (await fetch("/api/config")).json(); }
+  catch (e) { $("login-err").textContent = "No se pudo contactar con el servidor (/api/config). ¿Sigue corriendo uvicorn?"; return; }
+  if (!cfg.supabase_url || !cfg.supabase_anon_key) { $("login-err").textContent = "El servidor no tiene configurado Supabase (SUPABASE_URL / SUPABASE_ANON_KEY)."; return; }
+  if (typeof supabase === "undefined") { $("login-err").textContent = "No se pudo cargar la librería de Supabase (cdn.jsdelivr.net). Revisa tu conexión o adblock."; return; }
+  sb = supabase.createClient(cfg.supabase_url, cfg.supabase_anon_key);
+  sb.auth.onAuthStateChange((_ev, s) => { session = s; applySession(); });
+  session = (await sb.auth.getSession()).data.session; applySession();
+})();
+</script>
+</body>
+</html>
