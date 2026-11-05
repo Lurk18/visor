@@ -1,0 +1,20 @@
+{
+  "ancho": 640,
+  "alto": 360,
+  "cajas": [
+    {
+      "frame": 1076,
+      "tiempo": "0:43.04",
+      "forma": "caja",
+      "box": [
+        72,
+        113,
+        194,
+        183
+      ],
+      "mascara": "annotations/manual_masks/mask_frame001076.png",
+      "frame_img": "annotations/frames/frame001076.jpg",
+      "miniatura": "metadata/miniaturas/manual_frame001076.jpg"
+    }
+  ]
+}

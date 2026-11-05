@@ -17,12 +17,10 @@ Para ello el cliente antepone 4 bytes de id a cada JPEG.
 import asyncio
 import base64
 import csv
+import io
 import os
 import re
 import json
-import shutil
-import subprocess
-import tempfile
 import threading
 import time
 from urllib.parse import quote
@@ -31,9 +29,8 @@ import cv2
 import httpx
 import numpy as np
 import torch
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
-from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 
 from viewer_uacanet import load_model, segment_frame
@@ -89,10 +86,14 @@ def jwt_role(key: str):
 CHECKPOINT = os.environ.get("CHECKPOINT", "best_model.pth")
 SIZE = int(os.environ.get("MODEL_SIZE", "352"))
 MAX_BYTES = 4 * 1024 * 1024  # limite por frame
-MAX_VIDEO_BYTES = int(os.environ.get("MAX_VIDEO_BYTES", str(2 * 1024 * 1024 * 1024)))  # 2 GiB por video
-FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
-HISTORY_DIR = os.environ.get("HISTORY_DIR", "./historial")
-HEAD = ["numero_hallazgo", "frame", "tiempo", "tipo", "archivo_imagen", "archivo_mascara"]
+# Raiz del almacenamiento (en el cluster: COLONOSCOPIAS_DIR=/home/Data/Colonoscopias)
+REGISTROS_DIR = os.environ.get("COLONOSCOPIAS_DIR") or os.environ.get("REGISTROS_DIR", "./registros")
+MAX_VIDEO_BYTES = int(os.environ.get("MAX_VIDEO_MB", "2048")) * 1024 * 1024
+PID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")   # ID que da el hospital
+SESION_RE = re.compile(r"^colonoscopia_\d{4}_\d{3,}$")        # colonoscopia_<año>_<consecutivo global del año>
+SUBDIRS = ("video", "predictions/masks", "predictions/frames", "annotations/manual_masks",
+           "annotations/frames", "transcriptions", "metadata/miniaturas")
+VIDEO_EXTS = {".mp4", ".webm", ".mov", ".avi", ".mkv"}
 history_lock = threading.Lock()
 
 # ---------- autenticacion con Supabase ----------
@@ -195,70 +196,6 @@ def health():
             "supabase": state.get("supabase")}
 
 
-@app.post("/api/video/compatible")
-async def compatible_video(file: UploadFile = File(...), user: dict = Depends(current_user)):
-    """Convierte un video subido a MP4/H.264/yuv420p para reproduccion web.
-
-    El original no se guarda: se procesa en un directorio temporal y se elimina
-    cuando FastAPI termina de enviar el MP4 convertido al navegador.
-    """
-    if not shutil.which(FFMPEG_BIN):
-        raise HTTPException(503, "FFmpeg no esta instalado en el servidor. Instala FFmpeg y reinicia el visor.")
-
-    temp_dir = tempfile.mkdtemp(prefix="visor_video_")
-    input_path = os.path.join(temp_dir, "original_upload")
-    output_path = os.path.join(temp_dir, "video_compatible.mp4")
-    total = 0
-    try:
-        # Escritura por bloques para no cargar videos grandes completos en RAM.
-        with open(input_path, "wb") as dst:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > MAX_VIDEO_BYTES:
-                    raise HTTPException(413, f"El video supera el limite de {MAX_VIDEO_BYTES // (1024 * 1024)} MB.")
-                dst.write(chunk)
-        if total == 0:
-            raise HTTPException(400, "El archivo de video esta vacio.")
-
-        command = [
-            FFMPEG_BIN, "-hide_banner", "-loglevel", "error", "-y",
-            "-i", input_path,
-            "-map", "0:v:0", "-an",
-            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-            "-profile:v", "high", "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart", "-f", "mp4", output_path,
-        ]
-        result = await asyncio.to_thread(
-            subprocess.run, command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=7200, check=False
-        )
-        if result.returncode != 0 or not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
-            detail = (result.stderr or "FFmpeg no pudo convertir el archivo.")[-1800:]
-            raise HTTPException(422, f"No se pudo convertir el video: {detail}")
-
-        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", file.filename or "video")
-        download_name = os.path.splitext(safe_name)[0] + "_compatible.mp4"
-        return FileResponse(
-            output_path, media_type="video/mp4", filename=download_name,
-            background=BackgroundTask(shutil.rmtree, temp_dir, ignore_errors=True),
-        )
-    except HTTPException:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
-    except subprocess.TimeoutExpired:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise HTTPException(504, "La conversion excedio el tiempo limite de 2 horas.")
-    except Exception as exc:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise HTTPException(500, f"Error durante la conversion: {type(exc).__name__}")
-    finally:
-        await file.close()
-
-
 @app.post("/api/segment")
 async def segment_image(file: UploadFile = File(...), user: dict = Depends(current_user)):
     """Una sola imagen -> PNG con la probabilidad (0-255)."""
@@ -301,72 +238,283 @@ async def ws_segment(ws: WebSocket):
         pass
 
 
-# ---------- historial de hallazgos (mismo formato CSV que el visor de escritorio) ----------
-def video_dir(uid: str, video: str) -> str:
-    uid = re.sub(r"[^A-Za-z0-9_-]", "_", uid)[:64] or "anon"
-    key = re.sub(r"[^A-Za-z0-9._-]", "_", video)[:80].strip(".") or "video"
-    return os.path.join(HISTORY_DIR, uid, key + "_hallazgos")
+# ---------- registros: <raiz>/<usuario_id>/paciente_<ID>/colonoscopia_<año>_<NNN>/ ----------
+def user_dir(user: dict) -> str:
+    uid = re.sub(r"[^A-Za-z0-9_-]", "_", user.get("id", ""))[:64] or "anon"
+    return os.path.join(REGISTROS_DIR, uid)
 
 
-def read_rows(d):
-    p = os.path.join(d, "hallazgos.csv")
-    if not os.path.exists(p):
-        return []
-    with open(p, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+def patient_dir(user: dict, paciente: str) -> str:
+    if not PID_RE.match(paciente or ""):
+        raise HTTPException(400, "ID de paciente invalido (letras, numeros, . - _; maximo 40)")
+    return os.path.join(user_dir(user), "paciente_" + paciente)
 
 
-def write_rows(d, rows):
-    with open(os.path.join(d, "hallazgos.csv"), "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(HEAD)
-        for i, r in enumerate(rows, 1):
-            w.writerow([i, r["frame"], r["tiempo"], r["tipo"], r["archivo_imagen"], r["archivo_mascara"]])
+def session_dir(user: dict, paciente: str, sesion: str) -> str:
+    if not SESION_RE.match(sesion or ""):
+        raise HTTPException(400, "Colonoscopia invalida")
+    return os.path.join(patient_dir(user, paciente), sesion)
+
+
+def P(d, *parts):
+    return os.path.join(d, *parts)
+
+
+def jread(path, default):
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    return default
+
+
+def jwrite(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def now_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def reserve_code():
+    """Consecutivo GLOBAL por año (todos los usuarios y pacientes): colonoscopia_2026_001, _002, ...
+    Se reserva con un archivo creado en modo exclusivo en <raiz>/.indice, asi no se repite ni con varios procesos."""
+    year = time.strftime("%Y")
+    idx = os.path.join(REGISTROS_DIR, ".indice")
+    os.makedirs(idx, exist_ok=True)
+    n = 1 + max([int(m.group(1)) for f in os.listdir(idx) if (m := re.match(rf"^{year}_(\d+)$", f))], default=0)
+    while True:
+        path = os.path.join(idx, f"{year}_{n:03d}")
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return f"colonoscopia_{year}_{n:03d}", path
+        except FileExistsError:
+            n += 1
+
+
+def link_notes(d):
+    """Cada nota (descripcion o transcripcion) lista los hallazgos que hay en su mismo frame."""
+    frames = {}
+    for p in jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", []):
+        frames.setdefault(p["frame"], []).append("automatico")
+    for c in jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", []):
+        frames.setdefault(c["frame"], []).append("manual")
+    for path, key in ((P(d, "annotations", "descriptions.json"), "descripciones"),
+                      (P(d, "transcriptions", "transcript.json"), "transcripciones")):
+        data = jread(path, {})
+        changed = False
+        for n in data.get(key, []):
+            t = frames.get(n["frame"], [])
+            if n.get("hallazgos_en_frame") != t:
+                n["hallazgos_en_frame"] = t
+                changed = True
+        if changed:
+            jwrite(path, data)
+
+
+@app.post("/api/sessions")
+def create_session(paciente: str = Form(...), fuente: str = Form(""), user: dict = Depends(current_user)):
+    """Abre una colonoscopia nueva del paciente y devuelve su codigo (colonoscopia_<año>_<NNN>)."""
+    base = patient_dir(user, paciente)
+    with history_lock:
+        name, idxfile = reserve_code()
+        d = os.path.join(base, name)
+        for sd in SUBDIRS:
+            os.makedirs(P(d, *sd.split("/")))
+        with open(idxfile, "w", encoding="utf-8") as f:
+            f.write(f"{os.path.basename(user_dir(user))}/paciente_{paciente}/{name}\n")
+        jwrite(P(d, "metadata", "colonoscopy.json"),
+               {"estudio": name, "usuario_id": os.path.basename(user_dir(user)), "paciente_id": paciente,
+                "fuente": fuente[:120], "creado": now_iso(), "video": None, "ancho": None, "alto": None})
+        jwrite(P(d, "predictions", "metadata.json"),
+               {"modelo": os.path.basename(CHECKPOINT), "criterio": "un registro al iniciar cada deteccion",
+                "ancho": None, "alto": None, "predicciones": []})
+        jwrite(P(d, "annotations", "bounding_boxes.json"), {"ancho": None, "alto": None, "cajas": []})
+        jwrite(P(d, "annotations", "descriptions.json"), {"descripciones": []})
+        jwrite(P(d, "transcriptions", "transcript.json"),
+               {"motor": "Web Speech API (navegador)", "idioma": "es-419", "transcripciones": []})
+    return {"sesion": name}
+
+
+@app.get("/api/sessions")
+def list_sessions(paciente: str, user: dict = Depends(current_user)):
+    base = patient_dir(user, paciente)
+    out = []
+    if os.path.isdir(base):
+        with history_lock:
+            for n in sorted(os.listdir(base), reverse=True):
+                d = os.path.join(base, n)
+                if not (SESION_RE.match(n) and os.path.isdir(d)):
+                    continue
+                meta = jread(P(d, "metadata", "colonoscopy.json"), {})
+                out.append({"sesion": n, "creado": meta.get("creado", ""), "fuente": meta.get("fuente", ""),
+                            "hallazgos": len(jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", []))
+                                         + len(jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", [])),
+                            "tiene_video": bool(meta.get("video"))})
+    return out
+
+
+@app.put("/api/sessions/video")
+async def upload_video(request: Request, paciente: str, sesion: str, ext: str = ".mp4",
+                       append: int = 0, user: dict = Depends(current_user)):
+    """Guarda video/original.<ext> (cuerpo crudo; append=1 para la grabacion de la camara por trozos)."""
+    ext = ext.lower()
+    if ext not in VIDEO_EXTS:
+        raise HTTPException(400, "Formato de video no permitido")
+    d = session_dir(user, paciente, sesion)
+    if not os.path.isdir(d):
+        raise HTTPException(404, "La colonoscopia no existe")
+    path = P(d, "video", "original" + ext)
+    size = os.path.getsize(path) if (append and os.path.exists(path)) else 0
+    try:
+        with open(path, "ab" if append else "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_VIDEO_BYTES:
+                    raise HTTPException(413, "Video demasiado grande")
+                f.write(chunk)
+    except HTTPException:
+        if not append and os.path.exists(path):
+            os.remove(path)
+        raise
+    with history_lock:
+        meta = jread(P(d, "metadata", "colonoscopy.json"), {})
+        meta["video"] = {"archivo": f"video/original{ext}", "bytes": size, "actualizado": now_iso()}
+        jwrite(P(d, "metadata", "colonoscopy.json"), meta)
+    return {"ok": True, "bytes": size}
+
+
+def upsert(items, frame, entry):
+    items[:] = [x for x in items if x["frame"] != frame] + [entry]
+    items.sort(key=lambda x: x["frame"])
 
 
 @app.post("/api/findings")
-async def save_finding(video: str = Form(...), frame: int = Form(...), tiempo: str = Form(""),
-                       tipo: str = Form(...), thumb: UploadFile = File(...),
-                       mask: UploadFile = File(None), user: dict = Depends(current_user)):
-    if tipo not in ("automatico", "manual") or frame < 0:
+async def save_finding(paciente: str = Form(...), sesion: str = Form(...), frame: int = Form(...),
+                       tiempo: str = Form(""), tipo: str = Form(...), forma: str = Form(""),
+                       box: str = Form(""), ancho: int = Form(0), alto: int = Form(0), umbral: float = Form(0),
+                       thumb: UploadFile = File(...), frame_img: UploadFile = File(None),
+                       mask: UploadFile = File(None), pred: UploadFile = File(None),
+                       user: dict = Depends(current_user)):
+    """automatico -> predictions/ (mascara de probabilidad + frame); manual -> annotations/ (mascara + caja)."""
+    if tipo not in ("automatico", "manual") or frame < 0 or forma not in ("", "pincel", "caja", "mixta"):
         raise HTTPException(400, "Datos invalidos")
-    thumb_b = await thumb.read()
-    mask_b = await mask.read() if mask else None
-    if len(thumb_b) > MAX_BYTES or (mask_b and len(mask_b) > MAX_BYTES):
+    try:
+        bx = json.loads(box) if box else None
+        if bx is not None and not (isinstance(bx, list) and len(bx) == 4 and all(isinstance(v, (int, float)) for v in bx)):
+            raise ValueError
+    except ValueError:
+        raise HTTPException(400, "Caja invalida")
+    d = session_dir(user, paciente, sesion)
+    if not os.path.isdir(d):
+        raise HTTPException(404, "La colonoscopia no existe")
+    data = {"thumb": await thumb.read(), "frame": await frame_img.read() if frame_img else None,
+            "mask": await mask.read() if mask else None, "pred": await pred.read() if pred else None}
+    if any(b is not None and len(b) > MAX_BYTES for b in data.values()):
         raise HTTPException(413, "Archivo demasiado grande")
-    d = video_dir(user["id"], video)
-    img_name = f"hallazgo_{tipo}_frame{frame:06d}.jpg"
-    mask_name = f"mascara_frame{frame:06d}.png" if mask_b else ""
+    n = f"{frame:06d}"
+    auto = tipo == "automatico"
+    paths = {"thumb": f"metadata/miniaturas/{tipo}_frame{n}.jpg",
+             "frame": (f"predictions/frames/frame{n}.jpg" if auto else f"annotations/frames/frame{n}.jpg"),
+             "mask": f"annotations/manual_masks/mask_frame{n}.png",
+             "pred": f"predictions/masks/mask_frame{n}.png"}
     with history_lock:
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, img_name), "wb") as f:
-            f.write(thumb_b)
-        if mask_b:
-            with open(os.path.join(d, mask_name), "wb") as f:
-                f.write(mask_b)
-        rows = [r for r in read_rows(d) if not (int(r["frame"]) == frame and r["tipo"] == tipo)]
-        rows.append({"frame": frame, "tiempo": tiempo, "tipo": tipo,
-                     "archivo_imagen": img_name, "archivo_mascara": mask_name})
-        rows.sort(key=lambda r: int(r["frame"]))
-        write_rows(d, rows)
-    return {"ok": True, "total": len(rows)}
+        for k, rel in paths.items():
+            if data[k]:
+                with open(P(d, *rel.split("/")), "wb") as f:
+                    f.write(data[k])
+        box_r = [round(v) for v in bx] if bx else None
+        if auto:
+            fp = P(d, "predictions", "metadata.json")
+            pm = jread(fp, {"predicciones": []})
+            if ancho and alto:
+                pm["ancho"], pm["alto"] = ancho, alto        # las cajas estan en pixeles de esta imagen
+            upsert(pm.setdefault("predicciones", []), frame,
+                   {"frame": frame, "tiempo": tiempo, "detectado": True, "box": box_r, "umbral": umbral or None,
+                    "mascara": paths["pred"] if data["pred"] else None,
+                    "frame_img": paths["frame"] if data["frame"] else None, "miniatura": paths["thumb"]})
+            jwrite(fp, pm)
+        else:
+            fp = P(d, "annotations", "bounding_boxes.json")
+            bb = jread(fp, {"cajas": []})
+            if ancho and alto:
+                bb["ancho"], bb["alto"] = ancho, alto
+            upsert(bb.setdefault("cajas", []), frame,
+                   {"frame": frame, "tiempo": tiempo, "forma": forma or "pincel", "box": box_r,
+                    "mascara": paths["mask"] if data["mask"] else None,
+                    "frame_img": paths["frame"] if data["frame"] else None, "miniatura": paths["thumb"]})
+            jwrite(fp, bb)
+        meta = jread(P(d, "metadata", "colonoscopy.json"), {})
+        if ancho and alto:
+            meta["ancho"], meta["alto"] = ancho, alto
+            jwrite(P(d, "metadata", "colonoscopy.json"), meta)
+        link_notes(d)
+    return {"ok": True}
+
+
+@app.post("/api/notes")
+async def save_note(paciente: str = Form(...), sesion: str = Form(...), frame: int = Form(...),
+                    tiempo: str = Form(""), texto: str = Form(...), origen: str = Form("texto"),
+                    user: dict = Depends(current_user)):
+    """origen=voz -> transcriptions/transcript.json ; origen=texto -> annotations/descriptions.json"""
+    texto = texto.strip()[:2000]
+    if not texto or frame < 0 or origen not in ("texto", "voz"):
+        raise HTTPException(400, "Nota invalida")
+    d = session_dir(user, paciente, sesion)
+    if not os.path.isdir(d):
+        raise HTTPException(404, "La colonoscopia no existe")
+    path, key = ((P(d, "transcriptions", "transcript.json"), "transcripciones") if origen == "voz"
+                 else (P(d, "annotations", "descriptions.json"), "descripciones"))
+    with history_lock:
+        data = jread(path, {})
+        data.setdefault(key, []).append({"frame": frame, "tiempo": tiempo, "texto": texto, "creado": now_iso()})
+        data[key].sort(key=lambda x: x["frame"])
+        jwrite(path, data)
+        link_notes(d)
+    return {"ok": True}
 
 
 @app.get("/api/findings")
-def list_findings(video: str, user: dict = Depends(current_user)):
-    d = video_dir(user["id"], video)
-    url = lambda n: f"/api/findings/file?video={quote(video)}&name={n}"
+def list_findings(paciente: str, sesion: str, user: dict = Depends(current_user)):
+    d = session_dir(user, paciente, sesion)
+    if not os.path.isdir(d):
+        raise HTTPException(404, "La colonoscopia no existe")
+    url = lambda rel: f"/api/findings/file?paciente={quote(paciente)}&sesion={quote(sesion)}&name={quote(rel)}"
     with history_lock:
-        rows = read_rows(d)
-    return [{"frame": int(r["frame"]), "tiempo": r["tiempo"], "tipo": r["tipo"],
-             "thumb": url(r["archivo_imagen"]),
-             "mask": url(r["archivo_mascara"]) if r["archivo_mascara"] else None} for r in rows]
+        pred = jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", [])
+        cajas = jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", [])
+        notas = (jread(P(d, "annotations", "descriptions.json"), {}).get("descripciones", [])
+                 + jread(P(d, "transcriptions", "transcript.json"), {}).get("transcripciones", []))
+        meta = jread(P(d, "metadata", "colonoscopy.json"), {})
+    items = ([{"frame": p["frame"], "tiempo": p["tiempo"], "tipo": "automatico", "forma": "",
+               "thumb": url(p["miniatura"]), "mask": None} for p in pred]
+             + [{"frame": c["frame"], "tiempo": c["tiempo"], "tipo": "manual", "forma": c.get("forma", ""),
+                 "thumb": url(c["miniatura"]), "mask": url(c["mascara"]) if c.get("mascara") else None} for c in cajas])
+    items.sort(key=lambda r: r["frame"])
+    return {"hallazgos": items,
+            "notas": sorted(({"frame": n["frame"], "texto": n["texto"]} for n in notas), key=lambda n: n["frame"]),
+            "tiene_video": bool(meta.get("video"))}
 
 
 @app.get("/api/findings/file")
-def finding_file(video: str, name: str, user: dict = Depends(current_user)):
-    path = os.path.join(video_dir(user["id"], video), os.path.basename(name))
-    if not os.path.isfile(path):
+def finding_file(paciente: str, sesion: str, name: str, user: dict = Depends(current_user)):
+    d = session_dir(user, paciente, sesion)
+    if name == "hallazgos.csv":      # resumen generado al vuelo a partir de los JSON
+        rows = [["frame", "tiempo", "tipo", "forma", "x", "y", "ancho_caja", "alto_caja", "mascara", "frame_img"]]
+        for p in jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", []):
+            b = p.get("box") or ["", "", "", ""]
+            rows.append([p["frame"], p["tiempo"], "automatico", "", *b, p.get("mascara") or "", p.get("frame_img") or ""])
+        for c in jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", []):
+            b = c.get("box") or ["", "", "", ""]
+            rows.append([c["frame"], c["tiempo"], "manual", c.get("forma", ""), *b, c.get("mascara") or "", c.get("frame_img") or ""])
+        body = io.StringIO()
+        csv.writer(body).writerows(rows)
+        return Response(body.getvalue(), media_type="text/csv; charset=utf-8")
+    rel = os.path.normpath(name)
+    path = os.path.realpath(os.path.join(d, rel))
+    if rel.startswith("..") or os.path.isabs(rel) or not path.startswith(os.path.realpath(d) + os.sep) or not os.path.isfile(path):
         raise HTTPException(404, "No existe")
     return FileResponse(path)
 

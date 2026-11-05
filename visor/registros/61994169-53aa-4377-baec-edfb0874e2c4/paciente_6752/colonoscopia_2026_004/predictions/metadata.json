@@ -1,0 +1,38 @@
+{
+  "modelo": "best_model.pth",
+  "criterio": "un registro al iniciar cada deteccion",
+  "ancho": 640,
+  "alto": 360,
+  "predicciones": [
+    {
+      "frame": 913,
+      "tiempo": "0:36.52",
+      "detectado": true,
+      "box": [
+        589,
+        338,
+        34,
+        21
+      ],
+      "umbral": 0.5,
+      "mascara": "predictions/masks/mask_frame000913.png",
+      "frame_img": "predictions/frames/frame000913.jpg",
+      "miniatura": "metadata/miniaturas/automatico_frame000913.jpg"
+    },
+    {
+      "frame": 1335,
+      "tiempo": "0:53.40",
+      "detectado": true,
+      "box": [
+        590,
+        340,
+        32,
+        19
+      ],
+      "umbral": 0.5,
+      "mascara": "predictions/masks/mask_frame001335.png",
+      "frame_img": "predictions/frames/frame001335.jpg",
+      "miniatura": "metadata/miniaturas/automatico_frame001335.jpg"
+    }
+  ]
+}

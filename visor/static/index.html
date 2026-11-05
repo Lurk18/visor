@@ -15,13 +15,14 @@
   header { display:flex; align-items:baseline; gap:16px; padding:14px 0 10px; }
   h1 { font-size:18px; margin:0; font-weight:600; }
   #status { color:var(--muted); font-size:13px; }
-  main { display:grid; grid-template-columns:1fr 280px; gap:12px; }
+  main { display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:12px; }
   @media (max-width:900px){ main{grid-template-columns:1fr;} }
   .views { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
   @media (max-width:700px){ .views{grid-template-columns:1fr;} }
   figure { margin:0; background:#000; border:1px solid var(--line); border-radius:6px; overflow:hidden; position:relative; }
   figcaption { position:absolute; top:6px; left:8px; font-weight:600; text-shadow:0 1px 3px #000; }
-  video,canvas#out { width:100%; display:block; background:#000; }
+  video,canvas#out { display:block; margin:0 auto; background:#000; max-width:100%; }  /* el tamaño lo fija fit() en JS */
+  figure { min-width:0; }
   .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:var(--panel);
          border:1px solid var(--line); border-radius:6px; padding:10px; margin-top:8px; }
   button,label.btn { background:#2d3a43; color:var(--text); border:0; border-radius:5px; padding:8px 12px;
@@ -51,6 +52,13 @@
   #login button { margin-top:8px; background:#167d82; }
   #login-err { color:#ff8a8a; min-height:1.2em; margin:4px 0 0; }
   #logout { margin-left:6px; }
+  .views.solo { grid-template-columns:1fr; }
+  main.noaside { grid-template-columns:minmax(0,1fr); }
+  main.noaside aside { display:none; }
+  .bar input[type=text], .bar select, .bar textarea { background:#10161a; color:var(--text); border:1px solid var(--line);
+         border-radius:5px; padding:7px; font:inherit; }
+  #nota { flex:1; min-width:240px; resize:vertical; }
+  #mic.on { background:#7a2f3a; }
 </style>
 </head>
 <body>
@@ -74,11 +82,16 @@
   <span id="who" class="muted"></span><button id="logout">Cerrar sesión</button>
 </header>
 
-<main>
+<main id="main">
   <section>
-    <div class="views">
-      <figure><figcaption>Original</figcaption><video id="vid" playsinline muted controls></video></figure>
-      <figure><figcaption>Segmentación</figcaption><canvas id="out"></canvas></figure>
+    <div class="bar" id="pbar" style="margin:0 0 8px">
+      <label>ID del paciente <input id="pid" type="text" maxlength="40" size="16" autocomplete="off" placeholder="p. ej. 001"></label>
+      <label>Colonoscopia <select id="sesion"><option value="">Nueva (al abrir video o cámara)</option></select></label>
+      <span id="sesinfo" class="muted"></span>
+    </div>
+    <div class="views" id="views">
+      <figure id="fig-vid"><figcaption>Original</figcaption><video id="vid" playsinline muted controls></video></figure>
+      <figure id="fig-out"><figcaption>Segmentación</figcaption><canvas id="out"></canvas></figure>
     </div>
     <div class="bar">
       <label class="btn">Abrir video<input id="file" type="file" accept="video/*" hidden></label>
@@ -86,17 +99,32 @@
       <button id="analysis" class="on">Análisis: activado</button>
       <button id="mode">Modo: máscara</button>
       <button id="annot">Anotación: desactivada</button>
+      <button id="tool">Dibujar: pincel</button>
       <button id="save">Guardar marca</button>
       <button id="clear">Borrar marca</button>
       <label>Pincel <input id="brush" type="range" min="3" max="60" value="15"></label>
       <button id="dl">Descargar CSV</button>
       <label>Umbral <input id="thr" type="range" min="5" max="95" value="50"> <span id="thrv">0.50</span></label>
     </div>
+    <div class="bar" id="vbar">
+      <label>Tamaño del visor <input id="size" type="range" min="30" max="100" value="80"></label>
+      <label>Vista <select id="vista"><option value="ambas">Original + segmentación</option><option value="seg">Solo segmentación</option><option value="orig">Solo original</option></select></label>
+      <button id="panel">Ocultar panel</button>
+      <button id="fs">Pantalla completa</button>
+    </div>
+    <div class="bar" id="notebar">
+      <button id="mic">Dictar</button>
+      <textarea id="nota" rows="2" placeholder="Observación del frame actual (escribe o dicta)"></textarea>
+      <button id="savenote">Guardar nota</button>
+      <span id="micst" class="muted"></span>
+    </div>
   </section>
   <aside>
     <h2>Hallazgos (<span id="count">0</span>)</h2>
     <p id="saved" class="empty" aria-live="polite"></p>
     <div id="list"><p class="empty">Aún no hay hallazgos. Se registran cuando aparece un pólipo.</p></div>
+    <h2 style="margin-top:14px">Notas (<span id="ncount">0</span>)</h2>
+    <div id="nlist"><p class="empty">Sin notas.</p></div>
   </aside>
 </main>
 </div>
@@ -112,7 +140,9 @@ const FPS = 25, MAX_W = 640;   // FPS solo se usa para convertir tiempo <-> núm
 
 let ws, seq = 0, inflight = false, analysis = true, mode = "mask", thr = 0.5;
 let lastProb = null, lastFrame = null, hadDetection = false, findings = [];
-let videoKey = "", sentKey = 0, shownKey = 0, lastSent = -1;
+let sesion = "", pid = "", sesionTieneVideo = false, notes = [], tool = "pincel", recorder = null, upQ = Promise.resolve();
+let sentKey = 0, shownKey = 0, lastSent = -1, boxStart = null, boxNow = null;
+const PID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;   // ID que da el hospital
 let annotate = false, brush = 15, painting = null, lastPt = null;
 const marks = new Map();          // frame -> canvas con la marca manual (blanco = marcado)
 
@@ -189,7 +219,9 @@ function drawMark(c, m, w, h) {
 function render() {
   if (!lastFrame) return { detected: false, box: null };
   const w = lastFrame.width, h = lastFrame.height;
+  const resized = out.width !== w || out.height !== h;
   out.width = w; out.height = h;
+  if (resized) fit();
   const img = new ImageData(new Uint8ClampedArray(lastFrame.data), w, h);
   let hits = 0, minX = w, minY = h, maxX = 0, maxY = 0;
   if (lastProb && analysis) {
@@ -217,27 +249,58 @@ function render() {
 }
 
 /* ---------- anotación manual ---------- */
-function paintAt(ev) {
-  if (!lastFrame) return;
+function ptr(ev) {
+  const r = out.getBoundingClientRect(), k = out.width / r.width;
+  return [(ev.clientX - r.left) * k, (ev.clientY - r.top) * k];
+}
+function markCanvas() {
   let m = marks.get(shownKey);
   if (!m) { m = document.createElement("canvas"); m.width = out.width; m.height = out.height; marks.set(shownKey, m); }
-  const r = out.getBoundingClientRect(), k = m.width / r.width;
-  const x = (ev.clientX - r.left) * k, y = (ev.clientY - r.top) * k;
-  const c = m.getContext("2d");
+  return m;
+}
+function setForma(m, f) { m.forma = m.forma && m.forma !== f ? "mixta" : f; }
+function paintAt(ev) {
+  if (!lastFrame) return;
+  const m = markCanvas(), [x, y] = ptr(ev), c = m.getContext("2d");
   c.globalCompositeOperation = painting === "erase" ? "destination-out" : "source-over";
-  c.strokeStyle = "#fff"; c.lineWidth = 2 * brush * m.width / out.width; c.lineCap = "round";
+  c.strokeStyle = "#fff"; c.lineWidth = 2 * brush; c.lineCap = "round";
   const [x0, y0] = lastPt || [x, y];
   c.beginPath(); c.moveTo(x0, y0); c.lineTo(x, y); c.stroke();
   lastPt = [x, y];
+  if (painting !== "erase") setForma(m, "pincel");
   render();
 }
+function drawBoxPreview() {
+  const [x0, y0] = boxStart, [x1, y1] = boxNow;
+  ctx.strokeStyle = "#ffd700"; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+  ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
+  ctx.setLineDash([]);
+}
+function endPointer() {
+  if (boxStart && boxNow) {
+    const [x0, y0] = boxStart, [x1, y1] = boxNow;
+    const x = Math.min(x0, x1), y = Math.min(y0, y1), w = Math.abs(x1 - x0), h = Math.abs(y1 - y0);
+    if (w > 4 && h > 4) {
+      const m = markCanvas(), c = m.getContext("2d");
+      c.globalCompositeOperation = "source-over"; c.fillStyle = "#fff"; c.fillRect(x, y, w, h);
+      setForma(m, "caja");
+    }
+    render();
+  }
+  boxStart = boxNow = null; painting = null; lastPt = null;
+}
 out.addEventListener("pointerdown", e => {
-  if (!annotate) return;
+  if (!annotate || !lastFrame) return;
   out.setPointerCapture(e.pointerId);
-  painting = e.button === 2 ? "erase" : "draw"; lastPt = null; paintAt(e);
+  if (e.button === 2) { painting = "erase"; lastPt = null; paintAt(e); return; }   // clic derecho borra, con cualquier herramienta
+  if (tool === "caja") { boxStart = boxNow = ptr(e); return; }
+  painting = "draw"; lastPt = null; paintAt(e);
 });
-out.addEventListener("pointermove", e => { if (painting) paintAt(e); });
-["pointerup", "pointercancel"].forEach(t => out.addEventListener(t, () => { painting = null; lastPt = null; }));
+out.addEventListener("pointermove", e => {
+  if (boxStart) { boxNow = ptr(e); render(); drawBoxPreview(); }
+  else if (painting) paintAt(e);
+});
+["pointerup", "pointercancel"].forEach(t => out.addEventListener(t, endPointer));
 out.addEventListener("contextmenu", e => { if (annotate) e.preventDefault(); });
 
 function setAnnotate(on) {
@@ -247,6 +310,7 @@ function setAnnotate(on) {
   $("annot").textContent = "Anotación: " + (on ? "activada" : "desactivada");
   out.style.cursor = on ? "crosshair" : "default"; out.style.touchAction = on ? "none" : "auto";
 }
+function setTool(t) { tool = t; $("tool").textContent = "Dibujar: " + t; }
 
 function maskBox(m) {
   const d = m.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, m.width, m.height).data;
@@ -265,7 +329,7 @@ async function saveMark() {
   if (!box) { setSaved("No hay marca en este frame."); return; }
   const mc = document.createElement("canvas"); mc.width = m.width; mc.height = m.height;
   const c = mc.getContext("2d"); c.fillStyle = "#000"; c.fillRect(0, 0, mc.width, mc.height); c.drawImage(m, 0, 0);
-  pushFinding({ tipo: "manual", key: shownKey, box, maskCanvas: mc });
+  pushFinding({ tipo: "manual", key: shownKey, box, forma: m.forma || "pincel", maskCanvas: mc });
 }
 function clearMark() { marks.delete(shownKey); render(); }
 
@@ -280,17 +344,28 @@ function thumbOf(box) {
   return t;
 }
 
-async function pushFinding({ tipo, key, box, maskCanvas }) {
-  if (!videoKey) return;
+async function pushFinding({ tipo, key, box, forma = "", maskCanvas }) {
+  if (!sesion || !lastFrame) return;
   const thumb = thumbOf(box);
   findings = findings.filter(f => !(f.key === key && f.tipo === tipo));
   findings.push({ key, tipo, src: thumb.toDataURL("image/jpeg", 0.8) });
   findings.sort((a, b) => a.key - b.key);
   renderList();
+  const full = document.createElement("canvas"); full.width = lastFrame.width; full.height = lastFrame.height;
+  full.getContext("2d").putImageData(lastFrame, 0, 0);            // frame sin dibujos encima
+  let predC = null;                                               // copia síncrona: llegan frames nuevos mientras se sube
+  if (tipo === "automatico" && lastProb) {
+    predC = document.createElement("canvas"); predC.width = maskC.width; predC.height = maskC.height;
+    predC.getContext("2d").drawImage(maskC, 0, 0);
+  }
   const fd = new FormData();
-  fd.append("video", videoKey); fd.append("frame", key);
-  fd.append("tiempo", fmt(key / FPS)); fd.append("tipo", tipo);
+  fd.append("paciente", pid); fd.append("sesion", sesion); fd.append("frame", key);
+  fd.append("tiempo", fmt(key / FPS)); fd.append("tipo", tipo); fd.append("forma", forma);
+  if (box) fd.append("box", JSON.stringify(box.map(Math.round)));  // [x, y, ancho, alto] en píxeles de la imagen analizada
+  fd.append("ancho", out.width); fd.append("alto", out.height); fd.append("umbral", thr);
+  if (predC) fd.append("pred", await blobOf(predC, "image/png"), "p.png");
   fd.append("thumb", await blobOf(thumb, "image/jpeg"), "t.jpg");
+  fd.append("frame_img", await blobOf(full, "image/jpeg"), "f.jpg");
   if (maskCanvas) fd.append("mask", await blobOf(maskCanvas, "image/png"), "m.png");
   try {
     const r = await api("/api/findings", { method: "POST", body: fd });
@@ -326,76 +401,138 @@ function alphaFromGray(bmp) {
   return c;
 }
 
-async function openSource(key) {
-  videoKey = key; marks.clear(); findings = []; hadDetection = false; lastSent = -1; setSaved("");
+function renderNotes() {
+  $("ncount").textContent = notes.length;
+  const l = $("nlist"); l.innerHTML = "";
+  if (!notes.length) { l.innerHTML = '<p class="empty">Sin notas.</p>'; return; }
+  for (const n of notes) {
+    const d = document.createElement("div"); d.className = "find";
+    const t = document.createElement("span"), h = document.createElement("b");
+    h.textContent = fmt(n.frame / FPS);
+    t.append(h, document.createElement("br"), document.createTextNode(n.texto));   // textContent: nada se interpreta como HTML
+    d.appendChild(t);
+    d.onclick = () => { vid.pause(); vid.currentTime = n.frame / FPS; };
+    l.appendChild(d);
+  }
+}
+
+async function openSource() {
+  marks.clear(); findings = []; notes = []; hadDetection = false; lastSent = -1; setSaved("");
   try {
-    const rows = await (await api("/api/findings?video=" + encodeURIComponent(key))).json();
-    for (const row of rows) {
+    const r = await (await api(`/api/findings?paciente=${encodeURIComponent(pid)}&sesion=${encodeURIComponent(sesion)}`)).json();
+    for (const row of r.hallazgos) {
       findings.push({ key: row.frame, tipo: row.tipo, src: await blobUrl(row.thumb) });
-      if (row.mask) marks.set(row.frame, alphaFromGray(await createImageBitmap(await (await api(row.mask)).blob())));
+      if (row.mask) {
+        const c = alphaFromGray(await createImageBitmap(await (await api(row.mask)).blob()));
+        c.forma = row.forma || "pincel"; marks.set(row.frame, c);
+      }
     }
-    if (rows.length) setSaved(`Se cargaron ${rows.length} hallazgo(s) de una sesión anterior.`);
-  } catch { /* sin historial previo */ }
-  renderList();
+    notes = r.notas; sesionTieneVideo = r.tiene_video;
+    if (r.hallazgos.length) setSaved(`Se cargaron ${r.hallazgos.length} hallazgo(s) de esta colonoscopia.`);
+  } catch { /* colonoscopia nueva o sin historial */ }
+  renderList(); renderNotes();
+}
+
+/* ---------- paciente y colonoscopia ---------- */
+async function loadSessions() {
+  const sel = $("sesion"), p = $("pid").value.trim();
+  sel.innerHTML = '<option value="">Nueva (al abrir video o cámara)</option>';
+  if (!PID_RE.test(p)) return;
+  try {
+    const rows = await (await api("/api/sessions?paciente=" + encodeURIComponent(p))).json();
+    for (const r of rows)
+      sel.add(new Option(`${r.sesion} · ${(r.creado || "").replace("T", " ").slice(0, 16)} · ${r.hallazgos} hallazgo(s)`, r.sesion));
+  } catch { /* sin colonoscopias previas */ }
+}
+$("pid").onchange = loadSessions;
+
+async function beginSession(fuente) {
+  pid = $("pid").value.trim();
+  if (!PID_RE.test(pid)) {
+    $("status").textContent = "Escribe primero el ID del paciente (letras, números, . - _; máximo 40; debe empezar con letra o número).";
+    $("pid").focus(); return false;
+  }
+  if ($("sesion").value) sesion = $("sesion").value;                  // retomar una colonoscopia existente
+  else {
+    const fd = new FormData(); fd.append("paciente", pid); fd.append("fuente", fuente);
+    const r = await api("/api/sessions", { method: "POST", body: fd });
+    if (!r.ok) { $("status").textContent = "No se pudo crear la colonoscopia en el servidor."; return false; }
+    sesion = (await r.json()).sesion;
+    await loadSessions();
+  }
+  $("sesinfo").textContent = `${pid} / ${sesion}`;
+  await openSource();
+  return true;
+}
+
+function uploadVideo(file) {
+  if (sesionTieneVideo) return;
+  const ext = (file.name.match(/\.[A-Za-z0-9]{2,4}$/) || [".mp4"])[0].toLowerCase();
+  setSaved("Subiendo el video original al servidor…");
+  api(`/api/sessions/video?paciente=${encodeURIComponent(pid)}&sesion=${encodeURIComponent(sesion)}&ext=${ext}`,
+      { method: "PUT", body: file })
+    .then(r => setSaved(r.ok ? "Video original guardado en el servidor." : "No se pudo guardar el video original."))
+    .catch(() => setSaved("No se pudo guardar el video original."));
+}
+
+function startRecording(stream) {      // la cámara en vivo también queda guardada como video original
+  if (sesionTieneVideo || !window.MediaRecorder) return;
+  const mime = ["video/mp4", "video/webm;codecs=vp9", "video/webm"].find(t => MediaRecorder.isTypeSupported(t));
+  if (!mime) return;
+  const ext = mime.startsWith("video/mp4") ? ".mp4" : ".webm";
+  const q = `paciente=${encodeURIComponent(pid)}&sesion=${encodeURIComponent(sesion)}&ext=${ext}&append=1`;
+  recorder = new MediaRecorder(stream, { mimeType: mime });
+  recorder.ondataavailable = e => {
+    if (e.data.size) upQ = upQ.then(() => api(`/api/sessions/video?${q}`, { method: "PUT", body: e.data })).catch(() => {});
+  };
+  recorder.start(5000);
 }
 
 /* ---------- controles ---------- */
-let loadTok = 0, currentVideoUrl = null;
-const FORMAT_HELP = "El navegador no pudo reproducir el video. Se recomienda MP4/H.264/yuv420p.";
+let loadTok = 0;
+const FORMAT_HELP = "Probable causa: códec H.265/HEVC, 10 bits o 4:4:4. Conviértelo a MP4 estándar: ffmpeg -i entrada.mp4 -c:v libx264 -pix_fmt yuv420p -an salida.mp4";
 
 $("file").onchange = async e => {
   const f = e.target.files[0]; if (!f) return;
-  e.target.value = ""; // permite volver a elegir el mismo archivo
-  stopCam();
-  const tok = ++loadTok;
-  vid.pause(); vid.removeAttribute("src"); vid.load();
-  if (currentVideoUrl) { URL.revokeObjectURL(currentVideoUrl); currentVideoUrl = null; }
-  $("status").textContent = `Preparando ${f.name}: convirtiendo a MP4 compatible…`;
-
-  try {
-    const form = new FormData();
-    form.append("file", f, f.name);
-    const response = await api("/api/video/compatible", { method: "POST", body: form });
-    if (!response.ok) {
-      let message = `Error HTTP ${response.status}`;
-      try { message = (await response.json()).detail || message; } catch {}
-      throw new Error(message);
-    }
-    const converted = await response.blob();
-    if (tok !== loadTok) return;
-    currentVideoUrl = URL.createObjectURL(converted);
-    vid.src = currentVideoUrl;
-    vid.load();
-    $("status").textContent = `Video convertido. Cargando ${f.name}…`;
-    vid.play().catch(() => {});
-    await openSource(`${f.name}_${f.size}`);
-    setTimeout(() => {
-      if (tok !== loadTok || vid.srcObject || !vid.getAttribute("src")) return;
-      if (vid.readyState < 2 || !vid.videoWidth)
-        $("status").textContent = `El MP4 convertido todavía no entrega fotogramas (readyState ${vid.readyState}).`;
-    }, 15000);
-  } catch (err) {
-    if (tok === loadTok) $("status").textContent = `No se pudo preparar el video: ${err.message}`;
-  }
+  e.target.value = "";                       // permite volver a elegir el mismo archivo
+  if (!(await beginSession(f.name))) return;
+  stopCam(); vid.src = URL.createObjectURL(f);
+  $("status").textContent = `Cargando ${f.name}…`;
+  vid.play().catch(() => {});                // si el navegador bloquea el autoplay, se usa el botón de play
+  uploadVideo(f);
+  const tok = ++loadTok;                     // vigilante: algunos códecs no dan error pero tampoco imagen
+  setTimeout(() => {
+    if (tok !== loadTok || vid.srcObject || !vid.getAttribute("src")) return;
+    if (vid.readyState < 2 || !vid.videoWidth)
+      $("status").textContent = `El navegador no logra mostrar «${f.name}» (readyState ${vid.readyState}) tras 10 s. ` + FORMAT_HELP;
+  }, 10000);
 };
 vid.addEventListener("error", () => {
   if (!vid.error || vid.srcObject || !vid.getAttribute("src")) return;
-  $("status").textContent = vid.error.code === 4
-    ? "El navegador no soporta este formato de video. " + FORMAT_HELP
-    : "No se pudo decodificar el video (código " + vid.error.code + "). " + FORMAT_HELP;
+  $("status").textContent = `Error de reproducción (código ${vid.error.code}). ` + FORMAT_HELP;
 });
 vid.addEventListener("loadedmetadata", () => {
+  if (vid.srcObject || !vid.getAttribute("src") || vid.videoWidth) return;
+  $("status").textContent = "El navegador abrió el archivo pero no puede mostrar la imagen. " + FORMAT_HELP;
+});
+vid.addEventListener("loadeddata", () => {
   if (vid.srcObject || !vid.getAttribute("src")) return;
-  if (!vid.videoWidth) $("status").textContent = "El navegador abrió el archivo pero no puede mostrar la imagen (¿H.265/HEVC?). " + FORMAT_HELP;
-  else $("status").textContent = `Video cargado (${vid.videoWidth}×${vid.videoHeight})`;
+  $("status").textContent = `Video cargado (${vid.videoWidth}×${vid.videoHeight})`;
 });
 $("cam").onclick = async () => {
-  try {
-    const s = await navigator.mediaDevices.getUserMedia({ video: { width: 1280 }, audio: false });
-    vid.removeAttribute("src"); vid.srcObject = s; vid.play(); openSource("camara");
-  } catch { $("status").textContent = "No se pudo abrir la cámara (¿HTTPS y permisos?)"; }
+  let s;
+  try { s = await navigator.mediaDevices.getUserMedia({ video: { width: 1280 }, audio: false }); }
+  catch { $("status").textContent = "No se pudo abrir la cámara (¿HTTPS y permisos?)"; return; }
+  if (!(await beginSession("camara"))) { s.getTracks().forEach(t => t.stop()); return; }
+  stopCam(); vid.removeAttribute("src"); vid.srcObject = s; vid.play();
+  startRecording(s);
 };
-function stopCam() { loadTok++; if (vid.srcObject) { vid.srcObject.getTracks().forEach(t => t.stop()); vid.srcObject = null; } }
+function stopCam() {
+  loadTok++;
+  if (recorder && recorder.state !== "inactive") recorder.stop();   // el último trozo se sube solo
+  recorder = null;
+  if (vid.srcObject) { vid.srcObject.getTracks().forEach(t => t.stop()); vid.srcObject = null; }
+}
 
 $("analysis").onclick = e => {
   analysis = !analysis; lastSent = -1; lastProb = null; hadDetection = false;
@@ -408,24 +545,103 @@ $("annot").onclick = () => setAnnotate(!annotate);
 $("save").onclick = saveMark;
 $("clear").onclick = clearMark;
 $("brush").oninput = e => { brush = +e.target.value; };
+$("tool").onclick = () => setTool(tool === "caja" ? "pincel" : "caja");
 document.addEventListener("keydown", e => {
-  if (e.target.tagName === "INPUT" && e.target.type === "text") return;
+  if (e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT" || (e.target.tagName === "INPUT" && e.target.type === "text")) return;
   if (e.code === "Space") { e.preventDefault(); vid.paused ? vid.play() : vid.pause(); }
   else if (e.key === "a") vid.currentTime -= 1 / FPS;
   else if (e.key === "d") vid.currentTime += 1 / FPS;
   else if (e.key === "e") setAnnotate(!annotate);
   else if (e.key === "g") saveMark();
   else if (e.key === "c") clearMark();
+  else if (e.key === "b") setTool(tool === "caja" ? "pincel" : "caja");
   else if (e.key === "[") { brush = Math.max(3, brush - 3); $("brush").value = brush; }
   else if (e.key === "]") { brush = Math.min(60, brush + 3); $("brush").value = brush; }
 });
 
 $("dl").onclick = async () => {
-  if (!videoKey) return;
-  const r = await api(`/api/findings/file?video=${encodeURIComponent(videoKey)}&name=hallazgos.csv`);
+  if (!sesion) return;
+  const r = await api(`/api/findings/file?paciente=${encodeURIComponent(pid)}&sesion=${encodeURIComponent(sesion)}&name=hallazgos.csv`);
   if (!r.ok) { setSaved("Aún no hay historial para descargar."); return; }
   const a = document.createElement("a");
   a.href = URL.createObjectURL(await r.blob()); a.download = "hallazgos.csv"; a.click();
+};
+
+/* ---------- tamaño del visor ---------- */
+function fit() {          // cada vista llena su columna sin pasar de «Tamaño» (% del alto de la ventana), manteniendo la proporción
+  const maxH = innerHeight * $("size").value / 100;
+  for (const [el, w, h] of [[vid, vid.videoWidth, vid.videoHeight], [out, out.width, out.height]]) {
+    const cw = el.parentElement.clientWidth;
+    if (!w || !h || !cw) continue;
+    const k = Math.min(cw / w, maxH / h);
+    el.style.width = Math.round(w * k) + "px"; el.style.height = Math.round(h * k) + "px";
+  }
+}
+function applyVista() {
+  const v = $("vista").value;
+  $("views").classList.toggle("solo", v !== "ambas");
+  $("fig-vid").hidden = v === "seg"; $("fig-out").hidden = v === "orig";
+  fit();
+}
+function saveView() { try { localStorage.setItem("visor", JSON.stringify({ size: $("size").value, vista: $("vista").value })); } catch {} }
+try { const v = JSON.parse(localStorage.getItem("visor") || "{}"); if (v.size) $("size").value = v.size; if (v.vista) $("vista").value = v.vista; } catch {}
+$("size").oninput = () => { fit(); saveView(); };
+$("vista").onchange = () => { applyVista(); saveView(); };
+$("panel").onclick = () => {
+  const off = $("main").classList.toggle("noaside");
+  $("panel").textContent = off ? "Mostrar panel" : "Ocultar panel"; fit();
+};
+$("fs").onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+addEventListener("resize", fit);
+document.addEventListener("fullscreenchange", () => setTimeout(fit, 100));
+vid.addEventListener("loadedmetadata", fit);
+applyVista();
+
+/* ---------- notas por texto o voz ---------- */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recog = null, listening = false, avisado = false, usoVoz = false;
+function stopDictado() {
+  listening = false; if (recog) recog.stop();
+  $("mic").textContent = "Dictar"; $("mic").classList.remove("on"); $("micst").textContent = "";
+}
+if (!SR) { $("mic").disabled = true; $("micst").textContent = "Dictado no disponible en este navegador (usa Chrome o Edge); puedes escribir la nota."; }
+$("mic").onclick = () => {
+  if (listening) { stopDictado(); return; }
+  if (!avisado && !confirm("El dictado del navegador envía el audio a servidores externos (Google en Chrome, Microsoft en Edge). " +
+      "No digas el nombre del paciente ni otros datos que lo identifiquen. ¿Continuar?")) return;
+  avisado = true;
+  recog = new SR(); recog.lang = "es-419"; recog.continuous = true; recog.interimResults = true;
+  let base = $("nota").value.trim(); base = base ? base + " " : "";
+  recog.onresult = ev => {
+    let t = ""; for (let i = 0; i < ev.results.length; i++) t += ev.results[i][0].transcript;
+    $("nota").value = base + t; usoVoz = true;
+  };
+  recog.onend = () => {             // Chrome corta el dictado tras unos segundos de silencio: se reanuda solo
+    if (!listening) return;
+    base = $("nota").value.trim(); base = base ? base + " " : "";
+    try { recog.start(); } catch {}
+  };
+  recog.onerror = e => {
+    if (e.error === "no-speech" || e.error === "aborted") return;
+    $("micst").textContent = "Error de dictado: " + e.error; stopDictado();
+  };
+  listening = true; recog.start();
+  $("mic").textContent = "Detener"; $("mic").classList.add("on"); $("micst").textContent = "Escuchando…";
+};
+$("savenote").onclick = async () => {
+  const texto = $("nota").value.trim();
+  if (!sesion) { setSaved("Abre un video o la cámara con un ID de paciente antes de guardar notas."); return; }
+  if (!texto) return;
+  if (listening) stopDictado();
+  const fd = new FormData();
+  fd.append("paciente", pid); fd.append("sesion", sesion); fd.append("frame", shownKey);
+  fd.append("tiempo", fmt(shownKey / FPS)); fd.append("texto", texto); fd.append("origen", usoVoz ? "voz" : "texto");
+  try {
+    const r = await api("/api/notes", { method: "POST", body: fd });
+    if (!r.ok) throw new Error();
+    notes.push({ frame: shownKey, texto }); notes.sort((a, b) => a.frame - b.frame);
+    renderNotes(); $("nota").value = ""; usoVoz = false; setSaved("Nota guardada en el frame " + shownKey + ".");
+  } catch { setSaved("No se pudo guardar la nota."); }
 };
 
 /* ---------- sesión (Supabase) ---------- */
@@ -445,8 +661,8 @@ function applySession() {
   } else {
     if (ws) ws.close();
     stopCam(); vid.pause(); vid.removeAttribute("src"); vid.load();
-    if (currentVideoUrl) { URL.revokeObjectURL(currentVideoUrl); currentVideoUrl = null; }
-    videoKey = ""; findings = []; marks.clear(); lastFrame = lastProb = null; renderList();
+    sesion = ""; pid = ""; findings = []; notes = []; marks.clear(); lastFrame = lastProb = null; renderList(); renderNotes();
+    $("pid").value = ""; $("sesinfo").textContent = ""; loadSessions(); if (listening) stopDictado();
   }
 }
 
