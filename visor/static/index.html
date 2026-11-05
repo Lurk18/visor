@@ -150,8 +150,9 @@ const fmt = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(2).padStart(5, "0")}`
 const blobOf = (c, t) => new Promise(r => c.toBlob(r, t, 0.85));
 
 function connect() {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const u = new URL("ws", location.href);            // relativa a la página: sirve en / y en /projects/colon_viewe/
+  u.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(u);
   ws.binaryType = "arraybuffer";
   ws.onopen = async () => {
     const t = await token();
@@ -648,7 +649,7 @@ $("savenote").onclick = async () => {
 let sb = null, session = null, wsAuthed = false, started = false;
 async function token() { const { data } = await sb.auth.getSession(); return data.session ? data.session.access_token : null; }
 async function api(url, opts = {}) {
-  return fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: "Bearer " + await token() } });
+  return fetch(url.replace(/^\//, ""), { ...opts, headers: { ...(opts.headers || {}), Authorization: "Bearer " + await token() } });
 }
 async function blobUrl(url) { return URL.createObjectURL(await (await api(url)).blob()); }
 
@@ -691,7 +692,7 @@ $("logout").onclick = () => sb.auth.signOut();
 
 (async () => {
   $("login").hidden = false;
-  try { cfg = await (await fetch("/api/config")).json(); }
+  try { cfg = await (await fetch("api/config")).json(); }
   catch (e) { $("login-err").textContent = "No se pudo contactar con el servidor (/api/config). ¿Sigue corriendo uvicorn?"; return; }
   if (!cfg.supabase_url || !cfg.supabase_anon_key) { $("login-err").textContent = "El servidor no tiene configurado Supabase (SUPABASE_URL / SUPABASE_ANON_KEY)."; return; }
   if (typeof supabase === "undefined") { $("login-err").textContent = "No se pudo cargar la librería de Supabase (cdn.jsdelivr.net). Revisa tu conexión o adblock."; return; }

@@ -29,8 +29,8 @@ import cv2
 import httpx
 import numpy as np
 import torch
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi import APIRouter, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from viewer_uacanet import load_model, segment_frame
@@ -136,6 +136,7 @@ async def current_user(authorization: str = Header(default="")):
 
 
 app = FastAPI(title="UACANet-v2 Polyp Segmentation")
+router = APIRouter()   # las rutas viven aqui y se montan en la raiz y bajo BASE_PATHS (ver el final del archivo)
 state = {}
 gpu_lock = threading.Lock()  # una inferencia a la vez; el modelo no es thread-safe en la practica
 
@@ -184,19 +185,19 @@ def infer_png(jpeg: bytes) -> bytes:
     return png.tobytes()
 
 
-@app.get("/api/config")
+@router.get("/api/config")
 def public_config():
     """Datos publicos que necesita el navegador para iniciar sesion."""
     return {"supabase_url": SUPABASE_URL, "supabase_anon_key": SUPABASE_ANON_KEY}
 
 
-@app.get("/health")
+@router.get("/health")
 def health():
     return {"status": "ok", "device": str(state.get("device")), "model_loaded": "model" in state,
             "supabase": state.get("supabase")}
 
 
-@app.post("/api/segment")
+@router.post("/api/segment")
 async def segment_image(file: UploadFile = File(...), user: dict = Depends(current_user)):
     """Una sola imagen -> PNG con la probabilidad (0-255)."""
     data = await file.read()
@@ -209,7 +210,7 @@ async def segment_image(file: UploadFile = File(...), user: dict = Depends(curre
     return Response(png, media_type="image/png")
 
 
-@app.websocket("/ws")
+@router.websocket("/ws")
 async def ws_segment(ws: WebSocket):
     await ws.accept()
     try:  # el primer mensaje debe ser {"token": "<jwt>"}
@@ -314,7 +315,7 @@ def link_notes(d):
             jwrite(path, data)
 
 
-@app.post("/api/sessions")
+@router.post("/api/sessions")
 def create_session(paciente: str = Form(...), fuente: str = Form(""), user: dict = Depends(current_user)):
     """Abre una colonoscopia nueva del paciente y devuelve su codigo (colonoscopia_<año>_<NNN>)."""
     base = patient_dir(user, paciente)
@@ -338,7 +339,7 @@ def create_session(paciente: str = Form(...), fuente: str = Form(""), user: dict
     return {"sesion": name}
 
 
-@app.get("/api/sessions")
+@router.get("/api/sessions")
 def list_sessions(paciente: str, user: dict = Depends(current_user)):
     base = patient_dir(user, paciente)
     out = []
@@ -356,7 +357,7 @@ def list_sessions(paciente: str, user: dict = Depends(current_user)):
     return out
 
 
-@app.put("/api/sessions/video")
+@router.put("/api/sessions/video")
 async def upload_video(request: Request, paciente: str, sesion: str, ext: str = ".mp4",
                        append: int = 0, user: dict = Depends(current_user)):
     """Guarda video/original.<ext> (cuerpo crudo; append=1 para la grabacion de la camara por trozos)."""
@@ -391,7 +392,7 @@ def upsert(items, frame, entry):
     items.sort(key=lambda x: x["frame"])
 
 
-@app.post("/api/findings")
+@router.post("/api/findings")
 async def save_finding(paciente: str = Form(...), sesion: str = Form(...), frame: int = Form(...),
                        tiempo: str = Form(""), tipo: str = Form(...), forma: str = Form(""),
                        box: str = Form(""), ancho: int = Form(0), alto: int = Form(0), umbral: float = Form(0),
@@ -454,7 +455,7 @@ async def save_finding(paciente: str = Form(...), sesion: str = Form(...), frame
     return {"ok": True}
 
 
-@app.post("/api/notes")
+@router.post("/api/notes")
 async def save_note(paciente: str = Form(...), sesion: str = Form(...), frame: int = Form(...),
                     tiempo: str = Form(""), texto: str = Form(...), origen: str = Form("texto"),
                     user: dict = Depends(current_user)):
@@ -476,12 +477,12 @@ async def save_note(paciente: str = Form(...), sesion: str = Form(...), frame: i
     return {"ok": True}
 
 
-@app.get("/api/findings")
+@router.get("/api/findings")
 def list_findings(paciente: str, sesion: str, user: dict = Depends(current_user)):
     d = session_dir(user, paciente, sesion)
     if not os.path.isdir(d):
         raise HTTPException(404, "La colonoscopia no existe")
-    url = lambda rel: f"/api/findings/file?paciente={quote(paciente)}&sesion={quote(sesion)}&name={quote(rel)}"
+    url = lambda rel: f"api/findings/file?paciente={quote(paciente)}&sesion={quote(sesion)}&name={quote(rel)}"
     with history_lock:
         pred = jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", [])
         cajas = jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", [])
@@ -498,7 +499,7 @@ def list_findings(paciente: str, sesion: str, user: dict = Depends(current_user)
             "tiene_video": bool(meta.get("video"))}
 
 
-@app.get("/api/findings/file")
+@router.get("/api/findings/file")
 def finding_file(paciente: str, sesion: str, name: str, user: dict = Depends(current_user)):
     d = session_dir(user, paciente, sesion)
     if name == "hallazgos.csv":      # resumen generado al vuelo a partir de los JSON
@@ -519,9 +520,27 @@ def finding_file(paciente: str, sesion: str, name: str, user: dict = Depends(cur
     return FileResponse(path)
 
 
-@app.get("/")
+@router.get("/")
 def index():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
 
 
-app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
+# ---------- montaje: raiz y prefijos ----------
+# BASE_PATHS = prefijos separados por coma bajo los que tambien se sirve el visor.
+# Por defecto: /projects/colon_viewe  (y /projects/colon_viewer, por si el nombre lleva la "r").
+BASE_PATHS = ["/" + p.strip().strip("/")
+              for p in os.environ.get("BASE_PATHS", "/projects/colon_viewe,/projects/colon_viewer").split(",")
+              if p.strip().strip("/")]
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+
+def _redirect_to(path):
+    return lambda: RedirectResponse(path + "/")   # sin la barra final, las URL relativas del visor se romperian
+
+
+app.include_router(router)                         # http://localhost:8000/
+for _bp in BASE_PATHS:
+    app.include_router(router, prefix=_bp)         # http://localhost:8000/projects/colon_viewe/
+    app.add_api_route(_bp, _redirect_to(_bp), methods=["GET"], include_in_schema=False)
+    app.mount(_bp + "/static", StaticFiles(directory=STATIC_DIR), name="static" + _bp.replace("/", "_"))
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
