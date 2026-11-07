@@ -23,6 +23,11 @@ Abre http://localhost:8000. Para usar la cámara desde otro equipo se necesita H
 - Atajos: `e` anotar, `g` guardar marca, `c` borrar marca, `[` `]` pincel, `a`/`d` ±1 frame, espacio pausa.
   Clic izquierdo pinta, clic derecho borra.
 - El número de frame se calcula con 25 fps asumidos (el navegador no expone el fps real).
+- **Notas sobre un hallazgo:** haz clic en un hallazgo del panel (o en una nota ya guardada). El video se pausa en ese frame,
+  la fila queda resaltada y la nota se guarda ligada a ese hallazgo (`hallazgo: manual|automatico` en `descriptions.json` /
+  `transcript.json`). Si mueves el video a otro frame, la selección se quita y la nota vuelve a ir al frame que estás viendo.
+- **Dictado:** usa el reconocimiento de voz del navegador (Chrome o Edge). Requiere HTTPS (o `http://localhost`), permiso de
+  micrófono e internet; no funciona en Firefox ni en Brave. Si falla, el visor muestra el motivo debajo del cuadro de nota.
 
 ## Login con Supabase
 1. Crea un proyecto en https://supabase.com. En **Project Settings → API** copia la *Project URL* y la clave **anon** (publica).

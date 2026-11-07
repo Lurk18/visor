@@ -59,6 +59,20 @@
          border-radius:5px; padding:7px; font:inherit; }
   #nota { flex:1; min-width:240px; resize:vertical; }
   #mic.on { background:#7a2f3a; }
+  #micst { flex-basis:100%; }
+  #micst.err { color:#ff9a9a; }
+  #target { flex-basis:100%; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  #target b { color:var(--accent); }
+  #target button { padding:3px 9px; font-size:13px; }
+  .find { border-radius:4px; }
+  .find > span { min-width:0; flex:1; }
+  .find:hover { background:#232e35; }
+  .find.sel { background:#1f3a38; outline:2px solid var(--accent); outline-offset:-2px; }
+  .fnote { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;
+           margin-top:3px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+  .find .nhint { color:var(--warn); font-size:12px; }
+  #sync { padding:4px 10px; border-radius:99px; background:#2d3a43; font-size:13px; cursor:pointer; }
+  #sync.ok { background:#25574f; } #sync.pend { background:#765d20; } #sync.err { background:#7a2f3a; }
 </style>
 </head>
 <body>
@@ -79,6 +93,7 @@
   <h1>Visor de colonoscopia</h1>
   <span id="status">Sin conexión</span>
   <span id="badge">Sin detección</span>
+  <span id="sync" hidden title="Estado de la sincronización con el clúster (clic para reintentar)"></span>
   <span id="who" class="muted"></span><button id="logout">Cerrar sesión</button>
 </header>
 
@@ -113,10 +128,11 @@
       <button id="fs">Pantalla completa</button>
     </div>
     <div class="bar" id="notebar">
+      <div id="target" aria-live="polite"></div>
       <button id="mic">Dictar</button>
-      <textarea id="nota" rows="2" placeholder="Observación del frame actual (escribe o dicta)"></textarea>
+      <textarea id="nota" rows="2" placeholder="Observación (escribe o dicta). Elige un hallazgo del panel para anotarlo."></textarea>
       <button id="savenote">Guardar nota</button>
-      <span id="micst" class="muted"></span>
+      <span id="micst" class="muted" role="status"></span>
     </div>
   </section>
   <aside>
@@ -140,11 +156,12 @@ const FPS = 25, MAX_W = 640;   // FPS solo se usa para convertir tiempo <-> núm
 
 let ws, seq = 0, inflight = false, analysis = true, mode = "mask", thr = 0.5;
 let lastProb = null, lastFrame = null, hadDetection = false, findings = [];
-let sesion = "", pid = "", sesionTieneVideo = false, notes = [], tool = "pincel", recorder = null, upQ = Promise.resolve();
+let sesion = "", pid = "", sesionTieneVideo = false, sesionVideo = null, notes = [], tool = "pincel", recorder = null;
 let sentKey = 0, shownKey = 0, lastSent = -1, boxStart = null, boxNow = null;
 const PID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;   // ID que da el hospital
 let annotate = false, brush = 15, painting = null, lastPt = null;
 const marks = new Map();          // frame -> canvas con la marca manual (blanco = marcado)
+let sel = null;                   // hallazgo elegido para ponerle una nota: { key, tipo }
 
 const fmt = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(2).padStart(5, "0")}`;
 const blobOf = (c, t) => new Promise(r => c.toBlob(r, t, 0.85));
@@ -368,11 +385,8 @@ async function pushFinding({ tipo, key, box, forma = "", maskCanvas }) {
   fd.append("thumb", await blobOf(thumb, "image/jpeg"), "t.jpg");
   fd.append("frame_img", await blobOf(full, "image/jpeg"), "f.jpg");
   if (maskCanvas) fd.append("mask", await blobOf(maskCanvas, "image/png"), "m.png");
-  try {
-    const r = await api("/api/findings", { method: "POST", body: fd });
-    if (!r.ok) throw new Error();
-    setSaved(tipo === "manual" ? "Marca guardada en el servidor." : "");
-  } catch { setSaved("No se pudo guardar en el servidor."); }
+  await enqueue("POST", "/api/findings", fd);                  // se guarda primero en este equipo y se envía al clúster
+  if (tipo === "manual") setSaved("Marca guardada; sincronizando con el clúster…");
 }
 
 function setSaved(t) { $("saved").textContent = t; }
@@ -385,13 +399,46 @@ function renderList() {
     return;
   }
   for (const f of findings) {
-    const row = document.createElement("div"); row.className = "find";
-    row.innerHTML = `<img alt="Hallazgo"><span><b class="tag ${f.tipo}">${f.tipo === "manual" ? "Manual" : "Automático"}</b><br>${fmt(f.key / FPS)}</span>`;
-    row.querySelector("img").src = f.src;
-    row.onclick = () => { vid.pause(); vid.currentTime = f.key / FPS; };
+    const row = document.createElement("div");
+    row.className = "find" + (sel && sel.key === f.key && sel.tipo === f.tipo ? " sel" : "");
+    row.tabIndex = 0; row.setAttribute("role", "button");
+    row.setAttribute("aria-pressed", row.classList.contains("sel"));
+    const img = new Image(); img.alt = "Hallazgo"; img.src = f.src;
+    const info = document.createElement("span"), tag = document.createElement("b");
+    tag.className = "tag " + f.tipo; tag.textContent = f.tipo === "manual" ? "Manual" : "Automático";
+    info.append(tag, document.createElement("br"), document.createTextNode(`${fmt(f.key / FPS)} · frame ${f.key}`));
+    for (const n of notesOf(f)) {                                   // textContent: nada se interpreta como HTML
+      const p = document.createElement("span"); p.className = "fnote"; p.title = n.texto; p.textContent = "📝 " + n.texto;
+      info.append(p);
+    }
+    row.append(img, info);
+    row.onclick = () => selectFinding(f);
+    row.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectFinding(f); } };
     list.appendChild(row);
   }
 }
+
+/* ---------- elegir un hallazgo para anotarlo ---------- */
+const notesOf = f => notes.filter(n => n.frame === f.key && (!n.hallazgo || n.hallazgo === f.tipo));
+function selectFinding(f) {
+  sel = { key: f.key, tipo: f.tipo };
+  if (!vid.srcObject) { vid.pause(); try { vid.currentTime = f.key / FPS; } catch {} }   // en cámara en vivo no se puede volver atrás
+  renderList(); updateTarget();
+  if (matchMedia("(pointer:fine)").matches) $("nota").focus({ preventScroll: true });
+}
+function clearSel() { if (!sel) return; sel = null; renderList(); updateTarget(); }
+function updateTarget() {
+  const el = $("target"); el.innerHTML = "";
+  if (!sel) { el.className = "muted"; el.textContent = "Sin hallazgo elegido: la nota se guarda en el frame que estás viendo. Haz clic en un hallazgo del panel para anotarlo."; return; }
+  el.className = "";
+  const b = document.createElement("b");
+  b.textContent = `Nota para el hallazgo ${sel.tipo === "manual" ? "manual" : "automático"} · ${fmt(sel.key / FPS)} (frame ${sel.key})`;
+  const x = document.createElement("button"); x.textContent = "Quitar selección"; x.onclick = clearSel;
+  el.append(b, x);
+}
+// si el médico mueve el video a otro frame, deja de estar «sobre» ese hallazgo
+vid.addEventListener("seeking", () => { if (sel && !vid.srcObject && Math.round(vid.currentTime * FPS) !== sel.key) clearSel(); });
+vid.addEventListener("play", () => { if (sel && !vid.srcObject) clearSel(); });
 
 function alphaFromGray(bmp) {
   const c = document.createElement("canvas"); c.width = bmp.width; c.height = bmp.height;
@@ -409,16 +456,21 @@ function renderNotes() {
   for (const n of notes) {
     const d = document.createElement("div"); d.className = "find";
     const t = document.createElement("span"), h = document.createElement("b");
-    h.textContent = fmt(n.frame / FPS);
+    h.textContent = fmt(n.frame / FPS) + (n.hallazgo ? ` · hallazgo ${n.hallazgo === "manual" ? "manual" : "automático"}` : "");
     t.append(h, document.createElement("br"), document.createTextNode(n.texto));   // textContent: nada se interpreta como HTML
     d.appendChild(t);
-    d.onclick = () => { vid.pause(); vid.currentTime = n.frame / FPS; };
+    d.onclick = () => {
+      const f = findings.find(f => f.key === n.frame && (!n.hallazgo || f.tipo === n.hallazgo));
+      if (f) { selectFinding(f); return; }
+      vid.pause(); vid.currentTime = n.frame / FPS;
+    };
     l.appendChild(d);
   }
 }
 
 async function openSource() {
-  marks.clear(); findings = []; notes = []; hadDetection = false; lastSent = -1; setSaved("");
+  marks.clear(); findings = []; notes = []; sel = null; hadDetection = false; lastSent = -1; setSaved("");
+  sesionTieneVideo = false; sesionVideo = null;
   try {
     const r = await (await api(`/api/findings?paciente=${encodeURIComponent(pid)}&sesion=${encodeURIComponent(sesion)}`)).json();
     for (const row of r.hallazgos) {
@@ -428,10 +480,10 @@ async function openSource() {
         c.forma = row.forma || "pincel"; marks.set(row.frame, c);
       }
     }
-    notes = r.notas; sesionTieneVideo = r.tiene_video;
+    notes = r.notas; sesionTieneVideo = r.tiene_video; sesionVideo = r.video;
     if (r.hallazgos.length) setSaved(`Se cargaron ${r.hallazgos.length} hallazgo(s) de esta colonoscopia.`);
   } catch { /* colonoscopia nueva o sin historial */ }
-  renderList(); renderNotes();
+  renderList(); renderNotes(); updateTarget();
 }
 
 /* ---------- paciente y colonoscopia ---------- */
@@ -466,25 +518,18 @@ async function beginSession(fuente) {
   return true;
 }
 
-function uploadVideo(file) {
-  if (sesionTieneVideo) return;
-  const ext = (file.name.match(/\.[A-Za-z0-9]{2,4}$/) || [".mp4"])[0].toLowerCase();
-  setSaved("Subiendo el video original al servidor…");
-  api(`/api/sessions/video?paciente=${encodeURIComponent(pid)}&sesion=${encodeURIComponent(sesion)}&ext=${ext}`,
-      { method: "PUT", body: file })
-    .then(r => setSaved(r.ok ? "Video original guardado en el servidor." : "No se pudo guardar el video original."))
-    .catch(() => setSaved("No se pudo guardar el video original."));
-}
-
 function startRecording(stream) {      // la cámara en vivo también queda guardada como video original
   if (sesionTieneVideo || !window.MediaRecorder) return;
   const mime = ["video/mp4", "video/webm;codecs=vp9", "video/webm"].find(t => MediaRecorder.isTypeSupported(t));
   if (!mime) return;
   const ext = mime.startsWith("video/mp4") ? ".mp4" : ".webm";
-  const q = `paciente=${encodeURIComponent(pid)}&sesion=${encodeURIComponent(sesion)}&ext=${ext}&append=1`;
+  const qs = `paciente=${encodeURIComponent(pid)}&sesion=${encodeURIComponent(sesion)}&ext=${ext}`;
+  let recOff = 0;                      // posición del trozo dentro del archivo: el servidor lo escribe en ese lugar, sin duplicar
   recorder = new MediaRecorder(stream, { mimeType: mime });
   recorder.ondataavailable = e => {
-    if (e.data.size) upQ = upQ.then(() => api(`/api/sessions/video?${q}`, { method: "PUT", body: e.data })).catch(() => {});
+    if (!e.data.size) return;
+    const off = recOff; recOff += e.data.size;
+    enqueue("PUT", `/api/sessions/video?${qs}&offset=${off}`, e.data);
   };
   recorder.start(5000);
 }
@@ -493,32 +538,65 @@ function startRecording(stream) {      // la cámara en vivo también queda guar
 let loadTok = 0;
 const FORMAT_HELP = "Probable causa: códec H.265/HEVC, 10 bits o 4:4:4. Conviértelo a MP4 estándar: ffmpeg -i entrada.mp4 -c:v libx264 -pix_fmt yuv420p -an salida.mp4";
 
+/* ---------- conversión automática de videos que el navegador no reproduce ---------- */
+// La copia convertida (MP4/H.264) es solo para verla; el original se sube igual al historial sin tocarlo.
+let curFile = null, curUrl = null, convXhr = null, convState = {};      // convState[tok] = "running" | "done"
+function playUrl(u) { if (curUrl) URL.revokeObjectURL(curUrl); curUrl = u; vid.src = u; vid.play().catch(() => {}); }
+function convertVideo() {                  // true = se está convirtiendo (o se inició ahora); false = no hay nada más que intentar
+  const tok = loadTok, f = curFile;
+  if (!f || vid.srcObject || convState[tok]) return convState[tok] === "running" || convState[tok] === "failed";   // "failed": ya se mostró el motivo
+  convState[tok] = "running";
+  const st = t => { if (tok === loadTok) $("status").textContent = t; };
+  const fail = t => { convState[tok] = "failed"; st(`No se pudo preparar «${f.name}»: ${t}. ` + FORMAT_HELP); };
+  (async () => {
+    const ext = (f.name.match(/\.[A-Za-z0-9]{2,5}$/) || [".bin"])[0].toLowerCase();
+    const x = convXhr = new XMLHttpRequest();
+    x.open("POST", "api/video/compatible?ext=" + encodeURIComponent(ext));
+    x.setRequestHeader("Authorization", "Bearer " + await token());
+    x.responseType = "blob";
+    x.upload.onprogress = e => e.lengthComputable && st(`Formato no compatible: enviando «${f.name}» al servidor… ${Math.round(100 * e.loaded / e.total)}%`);
+    x.upload.onload = () => st("Convirtiendo a MP4 en el servidor (puede tardar varios minutos)…");
+    x.onprogress = e => e.lengthComputable && st(`Descargando video convertido… ${Math.round(100 * e.loaded / e.total)}%`);
+    x.onerror = () => fail("sin conexión con el servidor");
+    x.onabort = () => { convState[tok] = "done"; };
+    x.onload = async () => {
+      if (tok !== loadTok) return;                                      // el médico abrió otro video mientras tanto
+      if (x.status === 200) { convState[tok] = "done"; st("Video convertido a MP4 compatible (solo para visualizar)"); playUrl(URL.createObjectURL(x.response)); return; }
+      let msg = "HTTP " + x.status;
+      try { msg = (JSON.parse(await x.response.text()).detail) || msg; } catch {}
+      fail(msg);
+    };
+    st(`Formato no compatible con el navegador: preparando «${f.name}»…`);
+    x.send(f);
+  })();
+  return true;
+}
+
 $("file").onchange = async e => {
   const f = e.target.files[0]; if (!f) return;
   e.target.value = "";                       // permite volver a elegir el mismo archivo
+  if (convXhr) { try { convXhr.abort(); } catch {} convXhr = null; }
   if (!(await beginSession(f.name))) return;
-  stopCam(); vid.src = URL.createObjectURL(f);
+  stopCam(); curFile = f; playUrl(URL.createObjectURL(f));
   $("status").textContent = `Cargando ${f.name}…`;
-  vid.play().catch(() => {});                // si el navegador bloquea el autoplay, se usa el botón de play
-  uploadVideo(f);
+  uploadVideo(f);                            // el original se guarda tal cual en el clúster
   const tok = ++loadTok;                     // vigilante: algunos códecs no dan error pero tampoco imagen
   setTimeout(() => {
     if (tok !== loadTok || vid.srcObject || !vid.getAttribute("src")) return;
-    if (vid.readyState < 2 || !vid.videoWidth)
-      $("status").textContent = `El navegador no logra mostrar «${f.name}» (readyState ${vid.readyState}) tras 10 s. ` + FORMAT_HELP;
-  }, 10000);
+    if (vid.readyState < 2 || !vid.videoWidth) { if (!convertVideo()) $("status").textContent = `El navegador no logra mostrar «${f.name}». ` + FORMAT_HELP; }
+  }, 4000);
 };
 vid.addEventListener("error", () => {
   if (!vid.error || vid.srcObject || !vid.getAttribute("src")) return;
-  $("status").textContent = `Error de reproducción (código ${vid.error.code}). ` + FORMAT_HELP;
+  if (!convertVideo()) $("status").textContent = `Error de reproducción (código ${vid.error.code}). ` + FORMAT_HELP;
 });
 vid.addEventListener("loadedmetadata", () => {
   if (vid.srcObject || !vid.getAttribute("src") || vid.videoWidth) return;
-  $("status").textContent = "El navegador abrió el archivo pero no puede mostrar la imagen. " + FORMAT_HELP;
+  if (!convertVideo()) $("status").textContent = "El navegador abrió el archivo pero no puede mostrar la imagen. " + FORMAT_HELP;
 });
 vid.addEventListener("loadeddata", () => {
   if (vid.srcObject || !vid.getAttribute("src")) return;
-  $("status").textContent = `Video cargado (${vid.videoWidth}×${vid.videoHeight})`;
+  if (convState[loadTok] !== "done") $("status").textContent = `Video cargado (${vid.videoWidth}×${vid.videoHeight})`;
 });
 $("cam").onclick = async () => {
   let s;
@@ -600,50 +678,216 @@ applyVista();
 
 /* ---------- notas por texto o voz ---------- */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recog = null, listening = false, avisado = false, usoVoz = false;
-function stopDictado() {
-  listening = false; if (recog) recog.stop();
-  $("mic").textContent = "Dictar"; $("mic").classList.remove("on"); $("micst").textContent = "";
+let recog = null, listening = false, starting = false, avisado = false, usoVoz = false, fastEnds = 0, lastStart = 0;
+const micMsg = (t, err) => { $("micst").textContent = t || ""; $("micst").classList.toggle("err", !!err); };
+const DICT_ERR = {
+  "not-allowed": "El navegador no deja usar el micrófono. Pulsa el candado junto a la dirección → Micrófono → Permitir, y vuelve a intentar.",
+  "service-not-allowed": "El navegador bloqueó el servicio de voz (suele pasar fuera de HTTPS o con el micrófono bloqueado en el sistema).",
+  "audio-capture": "No se detecta ningún micrófono. Revisa que esté conectado y que no lo use otra aplicación.",
+  "network": "El servicio de voz del navegador no responde: necesita internet y acceso a los servidores de Google/Microsoft. " +
+             "En Brave y otros navegadores sin ese servicio no funciona; usa Chrome o Edge.",
+  "language-not-supported": "El navegador no soporta el idioma configurado para dictar.",
+};
+function stopDictado(msg, err) {
+  listening = false; starting = false;
+  if (recog) { recog.onend = null; recog.onerror = null; try { recog.stop(); } catch {} }
+  $("mic").textContent = "Dictar"; $("mic").classList.remove("on");
+  micMsg(msg, err);                       // el mensaje de error se conserva: antes se borraba al instante y no se veía nada
 }
-if (!SR) { $("mic").disabled = true; $("micst").textContent = "Dictado no disponible en este navegador (usa Chrome o Edge); puedes escribir la nota."; }
-$("mic").onclick = () => {
-  if (listening) { stopDictado(); return; }
+if (!SR) { $("mic").disabled = true; micMsg("Dictado no disponible en este navegador (usa Chrome o Edge); puedes escribir la nota."); }
+$("mic").onclick = async () => {
+  if (listening || starting) { stopDictado(); return; }
+  if (!window.isSecureContext) {
+    micMsg(`El dictado solo funciona con HTTPS o abriendo el visor como http://localhost. Ahora estás en ${location.origin}.`, true); return;
+  }
   if (!avisado && !confirm("El dictado del navegador envía el audio a servidores externos (Google en Chrome, Microsoft en Edge). " +
       "No digas el nombre del paciente ni otros datos que lo identifiquen. ¿Continuar?")) return;
-  avisado = true;
+  avisado = true; starting = true; micMsg("Pidiendo acceso al micrófono…");
+  try {                                    // pide el permiso aquí para distinguir «sin permiso» de «sin micrófono»
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    s.getTracks().forEach(t => t.stop());
+  } catch (err) {
+    stopDictado(err && err.name === "NotFoundError" ? DICT_ERR["audio-capture"] : DICT_ERR["not-allowed"], true); return;
+  }
+  if (!starting) return;                   // el médico canceló mientras aparecía el aviso de permiso
+  starting = false;
   recog = new SR(); recog.lang = "es-419"; recog.continuous = true; recog.interimResults = true;
   let base = $("nota").value.trim(); base = base ? base + " " : "";
+  let started = false; fastEnds = 0;
+  const go = () => { lastStart = Date.now(); recog.start(); };
+  recog.onstart = () => { started = true; micMsg("Escuchando… habla ahora"); };
   recog.onresult = ev => {
     let t = ""; for (let i = 0; i < ev.results.length; i++) t += ev.results[i][0].transcript;
-    $("nota").value = base + t; usoVoz = true;
+    $("nota").value = base + t; usoVoz = true; fastEnds = 0;
   };
   recog.onend = () => {             // Chrome corta el dictado tras unos segundos de silencio: se reanuda solo
     if (!listening) return;
+    if (Date.now() - lastStart < 1000 && ++fastEnds >= 3) { stopDictado("El dictado se interrumpe solo. Revisa el micrófono y la conexión.", true); return; }
     base = $("nota").value.trim(); base = base ? base + " " : "";
-    try { recog.start(); } catch {}
+    try { go(); } catch { stopDictado("No se pudo reanudar el dictado.", true); }
   };
   recog.onerror = e => {
     if (e.error === "no-speech" || e.error === "aborted") return;
-    $("micst").textContent = "Error de dictado: " + e.error; stopDictado();
+    stopDictado(DICT_ERR[e.error] || "Error de dictado: " + e.error, true);
   };
-  listening = true; recog.start();
-  $("mic").textContent = "Detener"; $("mic").classList.add("on"); $("micst").textContent = "Escuchando…";
+  listening = true;
+  try { go(); } catch (err) { stopDictado("No se pudo iniciar el dictado: " + err.message, true); return; }
+  $("mic").textContent = "Detener"; $("mic").classList.add("on"); micMsg("Iniciando dictado…");
+  setTimeout(() => { if (listening && !started) stopDictado("El navegador no inició el reconocimiento de voz. Prueba en Chrome o Edge y revisa la conexión.", true); }, 8000);
 };
 $("savenote").onclick = async () => {
   const texto = $("nota").value.trim();
   if (!sesion) { setSaved("Abre un video o la cámara con un ID de paciente antes de guardar notas."); return; }
   if (!texto) return;
   if (listening) stopDictado();
+  const key = sel ? sel.key : shownKey, hallazgo = sel ? sel.tipo : "";
   const fd = new FormData();
-  fd.append("paciente", pid); fd.append("sesion", sesion); fd.append("frame", shownKey);
-  fd.append("tiempo", fmt(shownKey / FPS)); fd.append("texto", texto); fd.append("origen", usoVoz ? "voz" : "texto");
-  try {
-    const r = await api("/api/notes", { method: "POST", body: fd });
-    if (!r.ok) throw new Error();
-    notes.push({ frame: shownKey, texto }); notes.sort((a, b) => a.frame - b.frame);
-    renderNotes(); $("nota").value = ""; usoVoz = false; setSaved("Nota guardada en el frame " + shownKey + ".");
-  } catch { setSaved("No se pudo guardar la nota."); }
+  fd.append("paciente", pid); fd.append("sesion", sesion); fd.append("frame", key);
+  fd.append("tiempo", fmt(key / FPS)); fd.append("texto", texto); fd.append("origen", usoVoz ? "voz" : "texto");
+  if (hallazgo) fd.append("hallazgo", hallazgo);               // la nota queda ligada a ese hallazgo, no solo al frame
+  fd.append("nota_id", nuevoId());                             // el servidor ignora un reenvío con el mismo id
+  await enqueue("POST", "/api/notes", fd);
+  notes.push({ frame: key, texto, hallazgo }); notes.sort((a, b) => a.frame - b.frame);
+  renderNotes(); renderList(); $("nota").value = ""; usoVoz = false;
+  setSaved((hallazgo ? `Nota guardada en el hallazgo ${hallazgo} (frame ${key})` : "Nota guardada en el frame " + key) + "; sincronizando…");
 };
+updateTarget();
+
+/* ---------- sincronización con el clúster ---------- */
+// Todo lo que se genera (hallazgos, notas y trozos de video de la cámara) se guarda primero en este equipo (IndexedDB)
+// y se envía al clúster en orden; si no hay red o el servidor falla, se reintenta con espera creciente.
+// El video de un archivo se sube por trozos y se reanuda desde donde quedó el servidor.
+const CHUNK = 8 * 1024 * 1024;
+const syncState = { video: null, videoError: "", offline: false, srv: null, pend: 0 };
+const nuevoId = () => (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+
+const q = (() => {
+  let impl = null;
+  const mem = () => { let n = 0, a = []; return {                       // sin IndexedDB (modo privado): solo mientras la pestaña siga abierta
+    add: async it => { it.seq = ++n; a.push(it); }, all: async () => a.slice(),
+    del: async k => { a = a.filter(i => i.seq !== k); }, put: async it => { a = a.map(i => i.seq === it.seq ? it : i); } }; };
+  const idb = db => {
+    const tx = (mode, fn) => new Promise((res, rej) => {
+      const t = db.transaction("q", mode), r = fn(t.objectStore("q"));
+      t.oncomplete = () => res(r.result); t.onerror = t.onabort = () => rej(t.error);
+    });
+    return { add: it => tx("readwrite", s => s.add(it)), all: () => tx("readonly", s => s.getAll()),
+             del: k => tx("readwrite", s => s.delete(k)), put: it => tx("readwrite", s => s.put(it)) };
+  };
+  const get = () => impl || (impl = new Promise(res => {
+    if (typeof indexedDB === "undefined") return res(mem());
+    try {
+      const r = indexedDB.open("visor-outbox", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("q", { keyPath: "seq", autoIncrement: true });
+      r.onsuccess = () => res(idb(r.result)); r.onerror = r.onblocked = () => res(mem());
+    } catch { res(mem()); }
+  }));
+  return { add: async it => (await get()).add(it), all: async () => (await get()).all(),
+           del: async k => (await get()).del(k), put: async it => (await get()).put(it) };
+})();
+
+function toFD(parts) {
+  const fd = new FormData();
+  for (const [k, v, name] of parts) name ? fd.append(k, v, name) : fd.append(k, v);
+  return fd;
+}
+async function enqueue(method, url, body) {
+  const item = { uid: session && session.user.id, method, url, failed: false, creado: Date.now() };   // uid: nunca se envía con la cuenta de otro usuario
+  if (body instanceof FormData) item.parts = [...body.entries()].map(([k, v]) => v instanceof Blob ? [k, v, v.name || "archivo"] : [k, v]);
+  else item.body = body;
+  await q.add(item);
+  setSync(); drain();
+}
+
+let draining = false, backoff = 2000, drainTimer = null;
+function scheduleDrain() { clearTimeout(drainTimer); drainTimer = setTimeout(drain, backoff); backoff = Math.min(backoff * 2, 60000); }
+async function drain() {
+  if (draining) return;
+  draining = true;
+  try {
+    for (;;) {
+      const me = session && session.user.id;
+      if (!me) break;
+      const it = (await q.all()).find(i => i.uid === me && !i.failed);
+      if (!it) { backoff = 2000; syncState.offline = false; setTimeout(refreshEstado, 4000); break; }
+      let r = null;
+      try { r = await api(it.url, { method: it.method, body: it.body || toFD(it.parts) }); } catch { /* sin red */ }
+      if (r && r.ok) { await q.del(it.seq); syncState.offline = false; backoff = 2000; setSync(); continue; }
+      if (r && r.status >= 400 && r.status < 500 && ![401, 408, 429].includes(r.status)) {   // el servidor lo rechazó: reintentar no sirve
+        it.failed = true; it.error = r.status; await q.put(it); setSync(); continue;
+      }
+      syncState.offline = !r; scheduleDrain(); break;      // sin red, sesión vencida, 429 o error del servidor
+    }
+  } finally { draining = false; setSync(); }
+}
+
+async function setSync() {
+  const el = $("sync");
+  if (!session) { el.hidden = true; return; }
+  el.hidden = false;
+  const mine = (await q.all()).filter(i => i.uid === session.user.id);
+  const bad = mine.filter(i => i.failed).length;
+  syncState.pend = mine.length - bad;
+  const v = syncState.video, s = syncState.srv;
+  let txt, cls;
+  if (bad || syncState.videoError) {
+    txt = syncState.videoError || `${bad} envío(s) rechazado(s) por el servidor · clic para reintentar`; cls = "err";
+  } else if (syncState.pend || v) {
+    const sinRed = !navigator.onLine || syncState.offline;
+    txt = `${sinRed ? "Sin conexión" : "Sincronizando"} · ${syncState.pend} pendiente(s)` +
+          (v && v.total ? ` · video ${Math.round(100 * v.sent / v.total)}%` : ""); cls = "pend";
+  } else {
+    const sb = s && { ok: "metadatos ok", pendiente: "metadatos pendientes", error: "error en metadatos" }[s.supabase];
+    txt = "Sincronizado con el clúster" + (sb ? " · " + sb : ""); cls = s && (s.supabase === "pendiente" || s.supabase === "error") ? "pend" : "ok";
+  }
+  el.textContent = txt; el.className = cls;
+}
+
+async function refreshEstado() {                            // lo que el clúster tiene guardado de esta colonoscopia
+  if (!sesion || !session) return;
+  try {
+    const r = await api(`/api/sessions/estado?paciente=${encodeURIComponent(pid)}&sesion=${encodeURIComponent(sesion)}`);
+    if (r.ok) { syncState.srv = await r.json(); setSync(); }
+  } catch { /* se verá en el próximo intento */ }
+}
+
+async function uploadVideo(file) {
+  if (sesionTieneVideo) return;
+  if (!file.size) { syncState.videoError = "El archivo de video está vacío"; setSync(); return; }
+  const myPid = pid, mySes = sesion, me = session && session.user.id;
+  const ext = (file.name.match(/\.[A-Za-z0-9]{2,4}$/) || [".mp4"])[0].toLowerCase();
+  const base = `/api/sessions/video?paciente=${encodeURIComponent(myPid)}&sesion=${encodeURIComponent(mySes)}&ext=${ext}&total=${file.size}`;
+  let off = sesionVideo && sesionVideo.total === file.size ? Math.min(sesionVideo.bytes, file.size) : 0;   // reanuda solo si es el mismo archivo
+  let wait = 2000;
+  syncState.video = { sent: off, total: file.size }; syncState.videoError = ""; setSync();
+  while (off < file.size) {
+    if (!session || session.user.id !== me) { syncState.video = null; setSync(); return; }   // sesión cerrada: se reanuda al volver a abrir el archivo
+    let r = null;
+    try { r = await api(`${base}&offset=${off}`, { method: "PUT", body: file.slice(off, Math.min(off + CHUNK, file.size)) }); } catch { /* sin red */ }
+    if (r && r.ok) { off = Math.min(off + CHUNK, file.size); wait = 2000; syncState.offline = false; syncState.video.sent = off; setSync(); continue; }
+    if (r && r.status === 409) { const j = await r.json().catch(() => null); off = j && j.bytes >= 0 ? j.bytes : 0; continue; }   // el servidor tiene menos: se reenvía desde ahí
+    if (r && [400, 403, 404, 413].includes(r.status)) {
+      syncState.video = null;
+      syncState.videoError = "No se pudo guardar el video original (" + (r.status === 413 ? "supera el tamaño máximo" : "HTTP " + r.status) + ") · clic para reintentar";
+      setSync(); return;
+    }
+    syncState.offline = !r; setSync();                      // sin red, 401, 429 o 5xx: se espera y se reintenta
+    await new Promise(res => setTimeout(res, wait)); wait = Math.min(wait * 2, 60000);
+  }
+  syncState.video = null;
+  if (sesion === mySes) sesionTieneVideo = true;
+  setSync(); setSaved("Video original guardado en el clúster."); refreshEstado();
+}
+
+$("sync").onclick = async () => {
+  if (!session) return;
+  for (const it of (await q.all()).filter(i => i.uid === session.user.id && i.failed)) { it.failed = false; await q.put(it); }
+  syncState.videoError = ""; backoff = 2000; drain(); refreshEstado();
+};
+addEventListener("online", () => { backoff = 2000; drain(); });
+addEventListener("offline", () => { syncState.offline = true; setSync(); });
+addEventListener("beforeunload", e => { if (syncState.video || syncState.pend) { e.preventDefault(); e.returnValue = ""; } });
+/* ---------- fin sincronización ---------- */
 
 /* ---------- sesión (Supabase) ---------- */
 let sb = null, session = null, wsAuthed = false, started = false;
@@ -659,11 +903,13 @@ function applySession() {
     $("who").textContent = session.user.email;
     if (!started) { started = true; loop(); }
     if (!ws || ws.readyState > 1) connect();
+    drain(); setSync();
   } else {
     if (ws) ws.close();
     stopCam(); vid.pause(); vid.removeAttribute("src"); vid.load();
-    sesion = ""; pid = ""; findings = []; notes = []; marks.clear(); lastFrame = lastProb = null; renderList(); renderNotes();
+    sesion = ""; pid = ""; findings = []; notes = []; sel = null; marks.clear(); lastFrame = lastProb = null; renderList(); renderNotes(); updateTarget();
     $("pid").value = ""; $("sesinfo").textContent = ""; loadSessions(); if (listening) stopDictado();
+    syncState.video = null; syncState.srv = null; syncState.videoError = ""; setSync();
   }
 }
 

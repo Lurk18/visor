@@ -17,10 +17,13 @@ Para ello el cliente antepone 4 bytes de id a cada JPEG.
 import asyncio
 import base64
 import csv
+from datetime import datetime
 import io
 import os
 import re
 import json
+import shutil
+import tempfile
 import threading
 import time
 from urllib.parse import quote
@@ -32,6 +35,7 @@ import torch
 from fastapi import APIRouter, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from viewer_uacanet import load_model, segment_frame
 
@@ -93,7 +97,7 @@ PID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")   # ID que da el hospi
 SESION_RE = re.compile(r"^colonoscopia_\d{4}_\d{3,}$")        # colonoscopia_<año>_<consecutivo global del año>
 SUBDIRS = ("video", "predictions/masks", "predictions/frames", "annotations/manual_masks",
            "annotations/frames", "transcriptions", "metadata/miniaturas")
-VIDEO_EXTS = {".mp4", ".webm", ".mov", ".avi", ".mkv"}
+VIDEO_EXTS = {".mp4", ".webm", ".mov", ".avi", ".mkv", ".mpg", ".mpeg", ".wmv", ".m4v"}
 history_lock = threading.Lock()
 
 # ---------- autenticacion con Supabase ----------
@@ -129,10 +133,11 @@ async def verify_token(token: str):
 
 
 async def current_user(authorization: str = Header(default="")):
-    user = await verify_token(authorization.removeprefix("Bearer ").strip())
+    token = authorization.removeprefix("Bearer ").strip()
+    user = await verify_token(token)
     if not user:
         raise HTTPException(401, "No autenticado")
-    return user
+    return {**user, "_token": token}
 
 
 app = FastAPI(title="UACANet-v2 Polyp Segmentation")
@@ -315,6 +320,82 @@ def link_notes(d):
             jwrite(path, data)
 
 
+# ---------- metadatos de los estudios en Supabase (tabla `estudios`, ver supabase_estudios.sql) ----------
+SUPABASE_TABLA = os.environ.get("SUPABASE_TABLA_ESTUDIOS", "estudios")
+SUPABASE_ACTIVO = os.environ.get("SUPABASE_SYNC_ESTUDIOS", "1") != "0" and bool(SUPABASE_URL and SUPABASE_ANON_KEY)
+SYNC_DEBOUNCE = float(os.environ.get("SYNC_DEBOUNCE", "2"))   # segundos: junta rafagas de eventos en un solo envio
+_sync_pending = set()
+
+
+def video_completo(meta):
+    v = meta.get("video")
+    return bool(v) and (not v.get("total") or v.get("bytes", 0) >= v["total"])
+
+
+def _iso_local(texto):
+    try:
+        return datetime.fromisoformat(texto).astimezone().isoformat(timespec="seconds")
+    except (TypeError, ValueError):
+        return None
+
+
+def study_counts(d):
+    return (len(jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", [])),
+            len(jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", [])),
+            len(jread(P(d, "annotations", "descriptions.json"), {}).get("descripciones", []))
+            + len(jread(P(d, "transcriptions", "transcript.json"), {}).get("transcripciones", [])))
+
+
+def study_row(d, user, paciente, sesion):
+    meta = jread(P(d, "metadata", "colonoscopy.json"), {})
+    video = meta.get("video") or {}
+    n_pred, n_caj, n_notas = study_counts(d)
+    return {"codigo": sesion, "usuario_id": user["id"], "paciente_id": paciente,
+            "ruta": f"{os.path.basename(user_dir(user))}/paciente_{paciente}/{sesion}",
+            "fuente": meta.get("fuente"), "creado": _iso_local(meta.get("creado", "")),
+            "actualizado": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "video_bytes": video.get("bytes"), "video_total": video.get("total"),
+            "n_predicciones": n_pred, "n_anotaciones": n_caj, "n_notas": n_notas,
+            "ancho": meta.get("ancho"), "alto": meta.get("alto")}
+
+
+def _push_study(user, d, paciente, sesion):
+    try:
+        time.sleep(SYNC_DEBOUNCE)
+        with history_lock:
+            _sync_pending.discard(d)
+            row = study_row(d, user, paciente, sesion)
+        estado = {"estado": "ok", "intento": now_iso()}
+        try:
+            r = httpx.post(f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLA}?on_conflict=codigo", json=row, timeout=10,
+                           headers={"apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + user["_token"],
+                                    "Content-Type": "application/json",
+                                    "Prefer": "resolution=merge-duplicates,return=minimal"})
+            if r.status_code not in (200, 201, 204):
+                estado = {"estado": "error", "intento": now_iso(), "http": r.status_code, "detalle": r.text[:200]}
+        except httpx.HTTPError as e:
+            estado = {"estado": "pendiente", "intento": now_iso(), "detalle": str(e)[:200]}
+        with history_lock:
+            meta = jread(P(d, "metadata", "colonoscopy.json"), {})
+            meta["supabase"] = estado
+            jwrite(P(d, "metadata", "colonoscopy.json"), meta)
+    finally:
+        with history_lock:
+            _sync_pending.discard(d)
+
+
+def sync_study(user, d, paciente, sesion):
+    """Programa, sin bloquear la peticion, el envio de los metadatos del estudio a Supabase.
+    Si Supabase no responde, queda como 'pendiente' y se reintenta con el siguiente evento del estudio."""
+    if not SUPABASE_ACTIVO:
+        return
+    with history_lock:
+        if d in _sync_pending:
+            return
+        _sync_pending.add(d)
+    threading.Thread(target=_push_study, args=(user, d, paciente, sesion), daemon=True).start()
+
+
 @router.post("/api/sessions")
 def create_session(paciente: str = Form(...), fuente: str = Form(""), user: dict = Depends(current_user)):
     """Abre una colonoscopia nueva del paciente y devuelve su codigo (colonoscopia_<año>_<NNN>)."""
@@ -336,6 +417,7 @@ def create_session(paciente: str = Form(...), fuente: str = Form(""), user: dict
         jwrite(P(d, "annotations", "descriptions.json"), {"descripciones": []})
         jwrite(P(d, "transcriptions", "transcript.json"),
                {"motor": "Web Speech API (navegador)", "idioma": "es-419", "transcripciones": []})
+    sync_study(user, d, paciente, name)
     return {"sesion": name}
 
 
@@ -353,38 +435,44 @@ def list_sessions(paciente: str, user: dict = Depends(current_user)):
                 out.append({"sesion": n, "creado": meta.get("creado", ""), "fuente": meta.get("fuente", ""),
                             "hallazgos": len(jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", []))
                                          + len(jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", [])),
-                            "tiene_video": bool(meta.get("video"))})
+                            "tiene_video": video_completo(meta)})
     return out
 
 
 @router.put("/api/sessions/video")
 async def upload_video(request: Request, paciente: str, sesion: str, ext: str = ".mp4",
-                       append: int = 0, user: dict = Depends(current_user)):
-    """Guarda video/original.<ext> (cuerpo crudo; append=1 para la grabacion de la camara por trozos)."""
+                       offset: int = 0, total: int = 0, user: dict = Depends(current_user)):
+    """Escribe el cuerpo en video/original.<ext> a partir de `offset` (subida por trozos, reanudable e idempotente).
+    offset=0 empieza el archivo de cero; offset mayor que lo guardado -> 409 con los bytes que hay."""
     ext = ext.lower()
     if ext not in VIDEO_EXTS:
         raise HTTPException(400, "Formato de video no permitido")
+    if offset < 0 or total < 0:
+        raise HTTPException(400, "Parametros invalidos")
+    if total > MAX_VIDEO_BYTES:
+        raise HTTPException(413, "Video demasiado grande")
     d = session_dir(user, paciente, sesion)
     if not os.path.isdir(d):
         raise HTTPException(404, "La colonoscopia no existe")
     path = P(d, "video", "original" + ext)
-    size = os.path.getsize(path) if (append and os.path.exists(path)) else 0
-    try:
-        with open(path, "ab" if append else "wb") as f:
-            async for chunk in request.stream():
-                size += len(chunk)
-                if size > MAX_VIDEO_BYTES:
-                    raise HTTPException(413, "Video demasiado grande")
-                f.write(chunk)
-    except HTTPException:
-        if not append and os.path.exists(path):
-            os.remove(path)
-        raise
+    have = os.path.getsize(path) if os.path.exists(path) else 0
+    if offset > have:
+        return Response(json.dumps({"bytes": have}), status_code=409, media_type="application/json")
+    size = offset
+    with open(path, "wb" if offset == 0 else "r+b") as f:
+        f.seek(offset)
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_VIDEO_BYTES:
+                raise HTTPException(413, "Video demasiado grande")   # el parcial se conserva
+            f.write(chunk)
     with history_lock:
         meta = jread(P(d, "metadata", "colonoscopy.json"), {})
-        meta["video"] = {"archivo": f"video/original{ext}", "bytes": size, "actualizado": now_iso()}
+        meta["video"] = {"archivo": f"video/original{ext}", "bytes": os.path.getsize(path),
+                         "total": total or None, "actualizado": now_iso()}
         jwrite(P(d, "metadata", "colonoscopy.json"), meta)
-    return {"ok": True, "bytes": size}
+    sync_study(user, d, paciente, sesion)
+    return {"ok": True, "bytes": meta["video"]["bytes"]}
 
 
 def upsert(items, frame, entry):
@@ -452,16 +540,19 @@ async def save_finding(paciente: str = Form(...), sesion: str = Form(...), frame
             meta["ancho"], meta["alto"] = ancho, alto
             jwrite(P(d, "metadata", "colonoscopy.json"), meta)
         link_notes(d)
+    sync_study(user, d, paciente, sesion)
     return {"ok": True}
 
 
 @router.post("/api/notes")
 async def save_note(paciente: str = Form(...), sesion: str = Form(...), frame: int = Form(...),
                     tiempo: str = Form(""), texto: str = Form(...), origen: str = Form("texto"),
-                    user: dict = Depends(current_user)):
-    """origen=voz -> transcriptions/transcript.json ; origen=texto -> annotations/descriptions.json"""
+                    nota_id: str = Form(""), hallazgo: str = Form(""), user: dict = Depends(current_user)):
+    """origen=voz -> transcriptions/transcript.json ; origen=texto -> annotations/descriptions.json.
+    nota_id (generado por el visor) evita duplicados cuando un envio se reintenta."""
     texto = texto.strip()[:2000]
-    if not texto or frame < 0 or origen not in ("texto", "voz"):
+    if (not texto or frame < 0 or origen not in ("texto", "voz") or hallazgo not in ("", "automatico", "manual")
+            or (nota_id and not re.match(r"^[A-Za-z0-9_-]{1,64}$", nota_id))):
         raise HTTPException(400, "Nota invalida")
     d = session_dir(user, paciente, sesion)
     if not os.path.isdir(d):
@@ -469,11 +560,21 @@ async def save_note(paciente: str = Form(...), sesion: str = Form(...), frame: i
     path, key = ((P(d, "transcriptions", "transcript.json"), "transcripciones") if origen == "voz"
                  else (P(d, "annotations", "descriptions.json"), "descripciones"))
     with history_lock:
+        if nota_id and any(n.get("id") == nota_id for p, k in (
+                (P(d, "transcriptions", "transcript.json"), "transcripciones"),
+                (P(d, "annotations", "descriptions.json"), "descripciones")) for n in jread(p, {}).get(k, [])):
+            return {"ok": True, "duplicada": True}
         data = jread(path, {})
-        data.setdefault(key, []).append({"frame": frame, "tiempo": tiempo, "texto": texto, "creado": now_iso()})
+        entry = {"frame": frame, "tiempo": tiempo, "texto": texto, "creado": now_iso()}
+        if nota_id:
+            entry["id"] = nota_id
+        if hallazgo:                       # nota ligada a un hallazgo concreto (un frame puede tener uno automatico y uno manual)
+            entry["hallazgo"] = hallazgo
+        data.setdefault(key, []).append(entry)
         data[key].sort(key=lambda x: x["frame"])
         jwrite(path, data)
         link_notes(d)
+    sync_study(user, d, paciente, sesion)
     return {"ok": True}
 
 
@@ -495,8 +596,27 @@ def list_findings(paciente: str, sesion: str, user: dict = Depends(current_user)
                  "thumb": url(c["miniatura"]), "mask": url(c["mascara"]) if c.get("mascara") else None} for c in cajas])
     items.sort(key=lambda r: r["frame"])
     return {"hallazgos": items,
-            "notas": sorted(({"frame": n["frame"], "texto": n["texto"]} for n in notas), key=lambda n: n["frame"]),
-            "tiene_video": bool(meta.get("video"))}
+            "notas": sorted(({"frame": n["frame"], "texto": n["texto"], "hallazgo": n.get("hallazgo", "")} for n in notas),
+                            key=lambda n: n["frame"]),
+            "tiene_video": video_completo(meta), "video": meta.get("video")}
+
+
+@router.get("/api/sessions/estado")
+def session_status(paciente: str, sesion: str, user: dict = Depends(current_user)):
+    """Lo que el clúster tiene guardado de esta colonoscopia y el estado del envío de metadatos a Supabase."""
+    d = session_dir(user, paciente, sesion)
+    if not os.path.isdir(d):
+        raise HTTPException(404, "La colonoscopia no existe")
+    with history_lock:
+        meta = jread(P(d, "metadata", "colonoscopy.json"), {})
+        n_pred, n_caj, n_notas = study_counts(d)
+    sb = meta.get("supabase") or {}
+    estado = sb.get("estado", "pendiente") if SUPABASE_ACTIVO else "desactivado"
+    if SUPABASE_ACTIVO and estado != "ok":
+        sync_study(user, d, paciente, sesion)          # reintento en segundo plano
+    return {"video": meta.get("video"), "video_completo": video_completo(meta),
+            "hallazgos": n_pred + n_caj, "notas": n_notas,
+            "supabase": estado, "supabase_intento": sb.get("intento"), "supabase_detalle": sb.get("detalle")}
 
 
 @router.get("/api/findings/file")
@@ -518,6 +638,64 @@ def finding_file(paciente: str, sesion: str, name: str, user: dict = Depends(cur
     if rel.startswith("..") or os.path.isabs(rel) or not path.startswith(os.path.realpath(d) + os.sep) or not os.path.isfile(path):
         raise HTTPException(404, "No existe")
     return FileResponse(path)
+
+
+# --- conversion de video a un formato que el navegador reproduce ---
+# El navegador solo reproduce bien MP4/H.264, 8 bits, yuv420p. Si el medico abre otro formato (AVI, MKV, HEVC, 10 bits...),
+# el visor envia el archivo aqui y recibe una copia convertida SOLO para verla. El original se sigue guardando intacto
+# en el historial por la subida normal. La conversion es con perdida (CRF 18): no uses la copia como archivo maestro.
+CONVERT_TIMEOUT = int(os.environ.get("CONVERT_TIMEOUT_S", str(2 * 3600)))
+_convert_slots = asyncio.Semaphore(int(os.environ.get("MAX_CONVERSIONS", "2")))
+
+
+async def _run_ffmpeg(ffmpeg, src, dst, fps_flag):
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-map", "0:v:0",
+           "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",              # yuv420p exige ancho y alto pares
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+           *fps_flag,                                               # conserva los tiempos originales: el numero de frame no cambia
+           "-an", "-movflags", "+faststart", dst]
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    try:
+        _, err = await asyncio.wait_for(proc.communicate(), CONVERT_TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise HTTPException(504, "La conversion tardo demasiado")
+    return proc.returncode, err.decode("utf-8", "replace")
+
+
+@router.post("/api/video/compatible")
+async def video_compatible(request: Request, ext: str = ".bin", user: dict = Depends(current_user)):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(503, "FFmpeg no esta instalado en el servidor (o no esta en el PATH)")
+    if not re.match(r"^\.[A-Za-z0-9]{2,5}$", ext):
+        ext = ".bin"
+    tmp = tempfile.mkdtemp(prefix="visor_conv_")
+    keep = False
+    try:
+        src, dst = os.path.join(tmp, "entrada" + ext), os.path.join(tmp, "salida.mp4")
+        size = 0
+        with open(src, "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_VIDEO_BYTES:
+                    raise HTTPException(413, "Video demasiado grande")
+                f.write(chunk)
+        if not size:
+            raise HTTPException(400, "Archivo vacio")
+        async with _convert_slots:
+            rc, err = await _run_ffmpeg(ffmpeg, src, dst, ["-fps_mode", "passthrough"])
+            if rc != 0 and "fps_mode" in err:                       # FFmpeg anterior a 5.1
+                rc, err = await _run_ffmpeg(ffmpeg, src, dst, ["-vsync", "0"])
+        if rc != 0 or not os.path.isfile(dst) or not os.path.getsize(dst):
+            raise HTTPException(422, "FFmpeg no pudo convertir el video: " + (err.strip()[-400:] or "sin detalle"))
+        keep = True                                                 # se borra despues de enviar la respuesta
+        return FileResponse(dst, media_type="video/mp4", background=BackgroundTask(shutil.rmtree, tmp, ignore_errors=True))
+    finally:
+        if not keep:
+            shutil.rmtree(tmp, ignore_errors=True)
+# --- fin conversion de video ---
 
 
 @router.get("/")

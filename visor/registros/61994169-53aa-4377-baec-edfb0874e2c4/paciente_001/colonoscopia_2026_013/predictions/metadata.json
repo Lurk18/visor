@@ -1,0 +1,23 @@
+{
+  "modelo": "best_model.pth",
+  "criterio": "un registro al iniciar cada deteccion",
+  "ancho": 640,
+  "alto": 360,
+  "predicciones": [
+    {
+      "frame": 0,
+      "tiempo": "0:00.00",
+      "detectado": true,
+      "box": [
+        44,
+        76,
+        453,
+        257
+      ],
+      "umbral": 0.5,
+      "mascara": "predictions/masks/mask_frame000000.png",
+      "frame_img": "predictions/frames/frame000000.jpg",
+      "miniatura": "metadata/miniaturas/automatico_frame000000.jpg"
+    }
+  ]
+}

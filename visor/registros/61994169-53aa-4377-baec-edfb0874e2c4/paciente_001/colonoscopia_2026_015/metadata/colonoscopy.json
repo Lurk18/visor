@@ -1,0 +1,19 @@
+{
+  "estudio": "colonoscopia_2026_015",
+  "usuario_id": "61994169-53aa-4377-baec-edfb0874e2c4",
+  "paciente_id": "001",
+  "fuente": "camara",
+  "creado": "2026-11-07T02:12:00",
+  "video": {
+    "archivo": "video/original.mp4",
+    "bytes": 2227100,
+    "total": null,
+    "actualizado": "2026-11-07T02:12:08"
+  },
+  "ancho": null,
+  "alto": null,
+  "supabase": {
+    "estado": "ok",
+    "intento": "2026-11-07T02:12:09"
+  }
+}

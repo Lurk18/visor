@@ -1,0 +1,36 @@
+{
+  "motor": "Web Speech API (navegador)",
+  "idioma": "es-419",
+  "transcripciones": [
+    {
+      "frame": 0,
+      "tiempo": "0:00.00",
+      "texto": "el paciente Presenta una herida de 10 mm en el colón izquierdo más encima Presenta una bifurcación de 2 m y no encontramos una forma de cerrarle el culo Entonces vamos a tener que suturarle y más encima vamos a enterrarlo vivo para que se sane a punta de gusanos y el doctor acaba de decir que nos vayamos todos porque va a empezar un capítulo de One Piece",
+      "creado": "2026-11-07T02:10:55",
+      "id": "d1aac856-9476-4c06-947e-8909ab9517f4",
+      "hallazgo": "automatico",
+      "hallazgos_en_frame": [
+        "automatico"
+      ]
+    },
+    {
+      "frame": 49,
+      "tiempo": "0:01.96",
+      "texto": "el paciente Presenta una herida de 2 mm en el colon derecho",
+      "creado": "2026-11-07T02:09:53",
+      "id": "fb938dbb-6d5c-4c16-924c-41325c35e6d6",
+      "hallazgo": "automatico",
+      "hallazgos_en_frame": [
+        "automatico"
+      ]
+    },
+    {
+      "frame": 749,
+      "tiempo": "0:29.96",
+      "texto": "el paciente tiene huevo",
+      "creado": "2026-11-07T02:09:37",
+      "id": "b7eaaadf-7e9f-4d1a-82d6-447c6c5bb213",
+      "hallazgos_en_frame": []
+    }
+  ]
+}

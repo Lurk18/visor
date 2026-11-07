@@ -1,0 +1,14 @@
+{
+  "estudio": "colonoscopia_2026_005",
+  "usuario_id": "61994169-53aa-4377-baec-edfb0874e2c4",
+  "paciente_id": "001",
+  "fuente": "clip_polipo (1).mp4",
+  "creado": "2026-11-07T01:27:05",
+  "video": {
+    "archivo": "video/original.mp4",
+    "bytes": 11547575,
+    "actualizado": "2026-11-07T01:27:05"
+  },
+  "ancho": null,
+  "alto": null
+}

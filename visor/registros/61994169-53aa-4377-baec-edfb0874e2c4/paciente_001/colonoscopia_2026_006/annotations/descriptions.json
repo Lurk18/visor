@@ -1,0 +1,18 @@
+{
+  "descripciones": [
+    {
+      "frame": 406,
+      "tiempo": "0:16.24",
+      "texto": "tiene huevo",
+      "creado": "2026-11-07T01:29:24",
+      "hallazgos_en_frame": []
+    },
+    {
+      "frame": 406,
+      "tiempo": "0:16.24",
+      "texto": "tiene demasiado huevo",
+      "creado": "2026-11-07T01:29:31",
+      "hallazgos_en_frame": []
+    }
+  ]
+}

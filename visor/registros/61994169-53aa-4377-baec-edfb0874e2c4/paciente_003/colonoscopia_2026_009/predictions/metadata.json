@@ -1,0 +1,7 @@
+{
+  "modelo": "best_model.pth",
+  "criterio": "un registro al iniciar cada deteccion",
+  "ancho": null,
+  "alto": null,
+  "predicciones": []
+}
