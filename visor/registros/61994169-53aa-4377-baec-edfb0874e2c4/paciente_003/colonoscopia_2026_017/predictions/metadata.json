@@ -1,0 +1,53 @@
+{
+  "modelo": "best_model.pth",
+  "criterio": "un registro al iniciar cada deteccion",
+  "ancho": 640,
+  "alto": 360,
+  "predicciones": [
+    {
+      "frame": 0,
+      "tiempo": "0:00.00",
+      "detectado": true,
+      "box": [
+        354,
+        161,
+        37,
+        56
+      ],
+      "umbral": 0.5,
+      "mascara": "predictions/masks/mask_frame000000.png",
+      "frame_img": "predictions/frames/frame000000.jpg",
+      "miniatura": "metadata/miniaturas/automatico_frame000000.jpg"
+    },
+    {
+      "frame": 73,
+      "tiempo": "0:02.92",
+      "detectado": true,
+      "box": [
+        395,
+        116,
+        43,
+        52
+      ],
+      "umbral": 0.5,
+      "mascara": "predictions/masks/mask_frame000073.png",
+      "frame_img": "predictions/frames/frame000073.jpg",
+      "miniatura": "metadata/miniaturas/automatico_frame000073.jpg"
+    },
+    {
+      "frame": 157,
+      "tiempo": "0:06.28",
+      "detectado": true,
+      "box": [
+        434,
+        194,
+        49,
+        46
+      ],
+      "umbral": 0.5,
+      "mascara": "predictions/masks/mask_frame000157.png",
+      "frame_img": "predictions/frames/frame000157.jpg",
+      "miniatura": "metadata/miniaturas/automatico_frame000157.jpg"
+    }
+  ]
+}

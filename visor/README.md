@@ -23,9 +23,22 @@ Abre http://localhost:8000. Para usar la cámara desde otro equipo se necesita H
 - Atajos: `e` anotar, `g` guardar marca, `c` borrar marca, `[` `]` pincel, `a`/`d` ±1 frame, espacio pausa.
   Clic izquierdo pinta, clic derecho borra.
 - El número de frame se calcula con 25 fps asumidos (el navegador no expone el fps real).
+- **Videos guardados (revisión posterior):** la pestaña «Videos guardados» lista todas las colonoscopias de la cuenta (paciente, fecha,
+  video, hallazgos, notas y estado de revisión: Pendiente / En revisión / Revisada). «Revisar» abre el video guardado en el visor, con sus
+  hallazgos y notas, para analizarlo y anotarlo como siempre; al abrirlo pasa a «En revisión» y «Marcar revisada y volver a la lista»
+  lo cierra. El video se reproduce por rangos (`/api/video/<ticket>`, el ticket vence en 8 h), así que se puede avanzar y retroceder sin
+  descargarlo entero. Si el original no es reproducible por el navegador (AVI, HEVC, 10 bits...) se convierte una sola vez en el servidor
+  (`video/colonoscopia.mp4`, requiere FFmpeg). El estado de revisión se guarda en `metadata/colonoscopy.json` (`revision`).
 - **Notas sobre un hallazgo:** haz clic en un hallazgo del panel (o en una nota ya guardada). El video se pausa en ese frame,
   la fila queda resaltada y la nota se guarda ligada a ese hallazgo (`hallazgo: manual|automatico` en `descriptions.json` /
   `transcript.json`). Si mueves el video a otro frame, la selección se quita y la nota vuelve a ir al frame que estás viendo.
+- **Finalizar colonoscopia (cámara):** el botón «Finalizar colonoscopia» detiene la cámara, sube el último tramo y pide al servidor
+  el cierre. Quedan en la carpeta de la colonoscopia: `video/colonoscopia.mp4` (video completo, navegable; el original que graba el
+  navegador se conserva), `notas.csv` y `hallazgos.csv`. Si FFmpeg no está instalado solo queda el original. Si el navegador se cierra
+  de golpe se pierde como máximo el último tramo de 5 s, por eso el visor avisa antes de cerrar la pestaña mientras graba.
+- **notas.csv:** `frame, tiempo, texto, origen (texto|voz), hallazgo (manual|automatico), hallazgos_en_frame, creado`. UTF-8 con BOM
+  (acentos correctos en Excel); se reescribe con cada nota y también se descarga desde el visor. Si Excel lo abre en una sola
+  columna, arranca el servidor con `CSV_SEP=";"`.
 - **Dictado:** usa el reconocimiento de voz del navegador (Chrome o Edge). Requiere HTTPS (o `http://localhost`), permiso de
   micrófono e internet; no funciona en Firefox ni en Brave. Si falla, el visor muestra el motivo debajo del cuadro de nota.
 

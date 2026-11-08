@@ -1,0 +1,15 @@
+{
+  "descripciones": [
+    {
+      "frame": 157,
+      "tiempo": "0:06.28",
+      "texto": "paciente medio jodido",
+      "creado": "2026-11-08T02:13:47",
+      "id": "55a1ec94-8098-417b-bbf7-82192684c260",
+      "hallazgo": "automatico",
+      "hallazgos_en_frame": [
+        "automatico"
+      ]
+    }
+  ]
+}

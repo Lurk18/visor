@@ -1,0 +1,34 @@
+{
+  "estudio": "colonoscopia_2026_017",
+  "usuario_id": "61994169-53aa-4377-baec-edfb0874e2c4",
+  "paciente_id": "003",
+  "fuente": "clip_polipo2.avi",
+  "creado": "2026-11-08T02:12:57",
+  "video": {
+    "archivo": "video/original.avi",
+    "bytes": 233853318,
+    "total": 233853318,
+    "actualizado": "2026-11-08T02:13:00"
+  },
+  "ancho": 640,
+  "alto": 360,
+  "supabase": {
+    "estado": "error",
+    "intento": "2026-11-08T02:15:21",
+    "http": 403,
+    "detalle": "{\"code\":\"42501\",\"details\":null,\"hint\":null,\"message\":\"new row violates row-level security policy (USING expression) for table \\\"estudios\\\"\"}"
+  },
+  "revision": {
+    "estado": "en_revision",
+    "fecha": "2026-11-08T02:14:59",
+    "por": "uverdesav@gmail.com"
+  },
+  "video_final": {
+    "estado": "ok",
+    "inicio": "2026-11-08T02:14:59",
+    "fin": "2026-11-08T02:15:18",
+    "archivo": "video/colonoscopia.mp4",
+    "bytes": 140517512,
+    "modo": "x264"
+  }
+}

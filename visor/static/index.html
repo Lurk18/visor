@@ -12,7 +12,8 @@
   * { box-sizing:border-box; }
   html,body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 "Segoe UI",system-ui,sans-serif; }
   body { padding:env(safe-area-inset-top,0) 14px env(safe-area-inset-bottom,0); }
-  header { display:flex; align-items:baseline; gap:16px; padding:14px 0 10px; }
+  header { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 16px; padding:14px 0 10px; }
+  header h1 { white-space:nowrap; }
   h1 { font-size:18px; margin:0; font-weight:600; }
   #status { color:var(--muted); font-size:13px; }
   main { display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:12px; }
@@ -55,11 +56,28 @@
   .views.solo { grid-template-columns:1fr; }
   main.noaside { grid-template-columns:minmax(0,1fr); }
   main.noaside aside { display:none; }
-  .bar input[type=text], .bar select, .bar textarea { background:#10161a; color:var(--text); border:1px solid var(--line);
+  .bar input[type=text], .bar input[type=search], .bar select, .bar textarea { background:#10161a; color:var(--text); border:1px solid var(--line);
          border-radius:5px; padding:7px; font:inherit; }
   #nota { flex:1; min-width:240px; resize:vertical; }
   #mic.on { background:#7a2f3a; }
+  main[hidden], #library[hidden] { display:none; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  #tabs { display:flex; gap:4px; }
+  #tabs button { background:transparent; border-radius:0; border-bottom:2px solid transparent; padding:6px 12px; color:var(--muted); }
+  #tabs button.on { color:var(--text); border-bottom-color:var(--accent); background:#25574f33; }
+  #library .tablewrap { overflow-x:auto; background:var(--panel); border:1px solid var(--line); border-radius:6px; margin-top:8px; }
+  #library table { width:100%; border-collapse:collapse; min-width:720px; }
+  #library th, #library td { text-align:left; padding:9px 10px; border-top:1px solid var(--line); vertical-align:middle; }
+  #library th { color:var(--muted); font-size:13px; font-weight:600; border-top:0; }
+  #library td.num, #library th.num { text-align:right; }
+  .st { padding:2px 9px; border-radius:10px; font-size:12px; white-space:nowrap; }
+  .st.pendiente { background:#5a4a1a; color:#ffd666; }
+  .st.en_revision { background:#1f3a5a; color:#8ec5ff; }
+  .st.revisada { background:#1f4a35; color:#7ee2a8; }
+  #rvbar b { color:var(--accent); }
   #micst { flex-basis:100%; }
+  #finish { background:#7a2f3a; }
+  #finish[hidden] { display:none; }
   #micst.err { color:#ff9a9a; }
   #target { flex-basis:100%; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
   #target b { color:var(--accent); }
@@ -91,6 +109,10 @@
 <div id="app" hidden>
 <header>
   <h1>Visor de colonoscopia</h1>
+  <nav id="tabs" aria-label="Secciones">
+    <button id="tab-visor" class="on">Visor</button>
+    <button id="tab-lib">Videos guardados</button>
+  </nav>
   <span id="status">Sin conexión</span>
   <span id="badge">Sin detección</span>
   <span id="sync" hidden title="Estado de la sincronización con el clúster (clic para reintentar)"></span>
@@ -99,6 +121,14 @@
 
 <main id="main">
   <section>
+    <div class="bar" id="rvbar" hidden style="margin:0 0 8px">
+      <button id="rvback">← Videos guardados</button>
+      <b id="rvtitle"></b>
+      <label>Estado de revisión
+        <select id="rvestado"><option value="pendiente">Pendiente</option><option value="en_revision">En revisión</option><option value="revisada">Revisada</option></select>
+      </label>
+      <button id="rvdone" title="Guarda el estado y vuelve a la lista">Marcar revisada y volver a la lista</button>
+    </div>
     <div class="bar" id="pbar" style="margin:0 0 8px">
       <label>ID del paciente <input id="pid" type="text" maxlength="40" size="16" autocomplete="off" placeholder="p. ej. 001"></label>
       <label>Colonoscopia <select id="sesion"><option value="">Nueva (al abrir video o cámara)</option></select></label>
@@ -111,6 +141,7 @@
     <div class="bar">
       <label class="btn">Abrir video<input id="file" type="file" accept="video/*" hidden></label>
       <button id="cam">Usar cámara</button>
+      <button id="finish" hidden title="Detiene la cámara y guarda el video completo y las notas">Finalizar colonoscopia</button>
       <button id="analysis" class="on">Análisis: activado</button>
       <button id="mode">Modo: máscara</button>
       <button id="annot">Anotación: desactivada</button>
@@ -118,7 +149,8 @@
       <button id="save">Guardar marca</button>
       <button id="clear">Borrar marca</button>
       <label>Pincel <input id="brush" type="range" min="3" max="60" value="15"></label>
-      <button id="dl">Descargar CSV</button>
+      <button id="dl">Descargar hallazgos (CSV)</button>
+      <button id="dlnotes">Descargar notas (CSV)</button>
       <label>Umbral <input id="thr" type="range" min="5" max="95" value="50"> <span id="thrv">0.50</span></label>
     </div>
     <div class="bar" id="vbar">
@@ -143,6 +175,23 @@
     <div id="nlist"><p class="empty">Sin notas.</p></div>
   </aside>
 </main>
+
+<section id="library" hidden>
+  <div class="bar" style="margin-top:0">
+    <label>Buscar paciente o código <input id="libq" type="search" size="18" autocomplete="off" placeholder="p. ej. 001"></label>
+    <label>Mostrar
+      <select id="libf"><option value="por_revisar">Por revisar</option><option value="todas">Todas</option><option value="revisada">Revisadas</option></select>
+    </label>
+    <button id="libr">Actualizar</button>
+    <span id="libinfo" class="muted" role="status"></span>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Fecha</th><th>Paciente</th><th>Colonoscopia</th><th>Origen</th><th>Video</th><th class="num">Hallazgos</th><th class="num">Notas</th><th>Revisión</th><th></th></tr></thead>
+      <tbody id="libl"></tbody>
+    </table>
+  </div>
+</section>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.58.0/dist/umd/supabase.js"></script>
@@ -156,7 +205,7 @@ const FPS = 25, MAX_W = 640;   // FPS solo se usa para convertir tiempo <-> núm
 
 let ws, seq = 0, inflight = false, analysis = true, mode = "mask", thr = 0.5;
 let lastProb = null, lastFrame = null, hadDetection = false, findings = [];
-let sesion = "", pid = "", sesionTieneVideo = false, sesionVideo = null, notes = [], tool = "pincel", recorder = null;
+let sesion = "", pid = "", sesionTieneVideo = false, sesionVideo = null, notes = [], tool = "pincel", recorder = null, recQ = Promise.resolve();
 let sentKey = 0, shownKey = 0, lastSent = -1, boxStart = null, boxNow = null;
 const PID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;   // ID que da el hospital
 let annotate = false, brush = 15, painting = null, lastPt = null;
@@ -525,13 +574,48 @@ function startRecording(stream) {      // la cámara en vivo también queda guar
   const ext = mime.startsWith("video/mp4") ? ".mp4" : ".webm";
   const qs = `paciente=${encodeURIComponent(pid)}&sesion=${encodeURIComponent(sesion)}&ext=${ext}`;
   let recOff = 0;                      // posición del trozo dentro del archivo: el servidor lo escribe en ese lugar, sin duplicar
+  const me = session && session.user.id, rp = pid, rs = sesion;
   recorder = new MediaRecorder(stream, { mimeType: mime });
   recorder.ondataavailable = e => {
     if (!e.data.size) return;
     const off = recOff; recOff += e.data.size;
-    enqueue("PUT", `/api/sessions/video?${qs}&offset=${off}`, e.data);
+    recQ = recQ.then(() => enqueue("PUT", `/api/sessions/video?${qs}&offset=${off}`, e.data, me)).catch(console.error);
+  };
+  recorder.onstop = () => {            // el navegador entrega el último trozo ANTES de «stop»; la cadena recQ garantiza el orden en la cola
+    recQ = recQ.then(() => {
+      const fd = new FormData(); fd.append("paciente", rp); fd.append("sesion", rs);
+      return enqueue("POST", "/api/sessions/finalizar", fd, me);     // el servidor arma el MP4 final y escribe notas.csv
+    }).then(() => { watchFinal(rp, rs); }).catch(console.error);
   };
   recorder.start(5000);
+}
+
+/* ---------- finalizar: seguimiento hasta que el video completo queda guardado ---------- */
+const FINAL_MSG = {
+  ok: vf => `Colonoscopia finalizada: video completo guardado (MP4, ${(vf.bytes / 1048576).toFixed(1)} MB) y notas en CSV.`,
+  sin_ffmpeg: () => "Colonoscopia finalizada. El video quedó guardado en el formato del navegador (.webm/.mp4); instala FFmpeg en el servidor para generar el MP4 final.",
+  error: vf => `El video original quedó guardado, pero no se pudo generar el MP4 final: ${vf.detalle || "error desconocido"}. Se puede reintentar finalizando de nuevo.`,
+  sin_video: () => "La cámara no llegó a grabar video; las notas sí quedaron en el CSV.",
+  interrumpido: () => "El servidor se reinició mientras preparaba el MP4. El video original está guardado.",
+};
+async function watchFinal(rp, rs) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < 3 * 3600e3) {
+    if (!session) return;                                       // sesión cerrada: los envíos pendientes salen al volver a entrar
+    await setSync();
+    const drained = !syncState.pend && !syncState.video;        // leer el estado SOLO cuando ya se subió todo (si no, vería un estado viejo)
+    if (!drained) setSaved(`Finalizando: subiendo el video al servidor… (${syncState.pend} envío(s) pendiente(s))`);
+    let est = null;
+    if (drained && session) {
+      try {
+        const r = await api(`/api/sessions/estado?paciente=${encodeURIComponent(rp)}&sesion=${encodeURIComponent(rs)}`);
+        if (r.ok) est = (await r.json()).video_final;
+      } catch { /* se reintenta */ }
+      if (est && FINAL_MSG[est.estado]) { setSaved(FINAL_MSG[est.estado](est)); if (sesion === rs) refreshEstado(); return; }
+      if (est) setSaved("Video subido. Preparando el MP4 final en el servidor…");
+    }
+    await new Promise(r => setTimeout(r, 2500));
+  }
 }
 
 /* ---------- controles ---------- */
@@ -576,6 +660,7 @@ $("file").onchange = async e => {
   const f = e.target.files[0]; if (!f) return;
   e.target.value = "";                       // permite volver a elegir el mismo archivo
   if (convXhr) { try { convXhr.abort(); } catch {} convXhr = null; }
+  leaveStored();                             // si venías revisando un video guardado, este archivo va a una colonoscopia NUEVA
   if (!(await beginSession(f.name))) return;
   stopCam(); curFile = f; playUrl(URL.createObjectURL(f));
   $("status").textContent = `Cargando ${f.name}…`;
@@ -588,29 +673,170 @@ $("file").onchange = async e => {
 };
 vid.addEventListener("error", () => {
   if (!vid.error || vid.srcObject || !vid.getAttribute("src")) return;
+  if (stored && vid.getAttribute("src") === stored.src) { storedFailed(); return; }
   if (!convertVideo()) $("status").textContent = `Error de reproducción (código ${vid.error.code}). ` + FORMAT_HELP;
 });
 vid.addEventListener("loadedmetadata", () => {
   if (vid.srcObject || !vid.getAttribute("src") || vid.videoWidth) return;
+  if (stored && vid.getAttribute("src") === stored.src) { storedFailed(); return; }
   if (!convertVideo()) $("status").textContent = "El navegador abrió el archivo pero no puede mostrar la imagen. " + FORMAT_HELP;
 });
 vid.addEventListener("loadeddata", () => {
   if (vid.srcObject || !vid.getAttribute("src")) return;
-  if (convState[loadTok] !== "done") $("status").textContent = `Video cargado (${vid.videoWidth}×${vid.videoHeight})`;
+  if (stored && vid.getAttribute("src") === stored.src) $("status").textContent = `Video guardado listo (${vid.videoWidth}×${vid.videoHeight}) · pulsa Espacio para reproducir`;
+  else if (convState[loadTok] !== "done") $("status").textContent = `Video cargado (${vid.videoWidth}×${vid.videoHeight})`;
 });
+
+/* ---------- videos guardados: lista y revisión ---------- */
+let stored = null;                           // { pid, sesion, src, prepared, retried, convertido } mientras se revisa un video guardado
+let libRows = [];
+const REV = { pendiente: "Pendiente", en_revision: "En revisión", revisada: "Revisada" };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function showTab(name) {
+  $("main").hidden = name !== "visor"; $("library").hidden = name !== "lib";
+  $("tab-visor").classList.toggle("on", name === "visor"); $("tab-lib").classList.toggle("on", name === "lib");
+  if (name === "lib") loadLibrary(); else fit();
+}
+$("tab-visor").onclick = () => showTab("visor");
+$("tab-lib").onclick = () => showTab("lib");
+$("rvback").onclick = () => showTab("lib");
+
+async function loadLibrary() {
+  $("libinfo").textContent = "Cargando…";
+  try {
+    const r = await api("/api/studies");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    libRows = await r.json();
+  } catch { $("libinfo").textContent = "No se pudo cargar la lista de colonoscopias."; return; }
+  renderLibrary();
+}
+function renderLibrary() {
+  const q = $("libq").value.trim().toLowerCase(), f = $("libf").value;
+  const rows = libRows.filter(r => (!q || r.paciente.toLowerCase().includes(q) || r.sesion.toLowerCase().includes(q))
+    && (f === "todas" || (f === "por_revisar" ? r.revision !== "revisada" : r.revision === f)));
+  const body = $("libl"); body.innerHTML = "";
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    const cell = (t, cls) => { const td = document.createElement("td"); if (cls) td.className = cls; td.textContent = t; tr.appendChild(td); return td; };
+    cell((r.creado || "").replace("T", " ").slice(0, 16));
+    cell(r.paciente); cell(r.sesion);
+    cell((r.fuente || "").slice(0, 40));
+    cell(r.video === "listo" ? "Disponible" + (r.video_bytes ? ` (${r.video_bytes >= 1048576 ? (r.video_bytes / 1048576).toFixed(0) + " MB" : Math.max(1, Math.round(r.video_bytes / 1024)) + " KB"})` : "") : r.video === "incompleto" ? "Incompleto" : "Sin video");
+    cell(r.hallazgos, "num"); cell(r.notas, "num");
+    const st = document.createElement("span"); st.className = "st " + r.revision; st.textContent = REV[r.revision] || r.revision;
+    if (r.revision_fecha) st.title = `${(r.revision_fecha || "").replace("T", " ").slice(0, 16)}${r.revision_por ? " · " + r.revision_por : ""}`;
+    cell("").appendChild(st);
+    const b = document.createElement("button"); b.textContent = r.revision === "revisada" ? "Abrir" : "Revisar";
+    b.disabled = r.video !== "listo"; b.title = b.disabled ? "Esta colonoscopia no tiene un video completo guardado" : "";
+    b.onclick = () => openStored(r.paciente, r.sesion);
+    cell("").appendChild(b);
+    body.appendChild(tr);
+  }
+  const porRevisar = libRows.filter(r => r.revision !== "revisada").length;
+  $("libinfo").textContent = libRows.length ? `${rows.length} de ${libRows.length} colonoscopia(s) · ${porRevisar} por revisar` : "Aún no hay colonoscopias guardadas.";
+  if (libRows.length && !rows.length) { const tr = document.createElement("tr"), td = document.createElement("td"); td.colSpan = 9; td.className = "empty"; td.textContent = "Ninguna coincide con el filtro."; tr.appendChild(td); body.appendChild(tr); }
+}
+$("libq").oninput = renderLibrary; $("libf").onchange = renderLibrary; $("libr").onclick = loadLibrary;
+
+function leaveStored() {                      // el desplegable de colonoscopia vuelve a «Nueva»: nada se anota por error en el video revisado
+  if (!stored) return;
+  stored = null; $("rvbar").hidden = true; $("sesion").value = "";
+}
+async function openStored(p, s) {
+  $("status").textContent = "Abriendo la colonoscopia…";
+  if (convXhr) { try { convXhr.abort(); } catch {} convXhr = null; }
+  stopCam(); vid.pause(); curFile = null;
+  if (curUrl) { URL.revokeObjectURL(curUrl); curUrl = null; }
+  vid.removeAttribute("src"); vid.srcObject = null; vid.load();       // no dejar el video anterior en pantalla: se podría anotar sobre el equivocado
+  lastFrame = lastProb = null; out.getContext("2d").clearRect(0, 0, out.width, out.height);
+  $("pid").value = p; await loadSessions(); $("sesion").value = s;
+  pid = p; sesion = s; stored = { pid: p, sesion: s, src: null, prepared: false, retried: false, convertido: false };
+  $("sesinfo").textContent = `${p} / ${s}`; $("rvtitle").textContent = `Revisando ${p} · ${s}`; $("rvbar").hidden = false;
+  const row = libRows.find(r => r.paciente === p && r.sesion === s);
+  $("rvestado").value = row ? row.revision : "pendiente";
+  showTab("visor");
+  await openSource();                         // hallazgos y notas ya guardados
+  if (!row || row.revision === "pendiente") setRevision("en_revision", true);
+  await loadStoredVideo();
+}
+async function setRevision(estado, quiet) {
+  const p = pid, s = sesion, fd = new FormData();
+  fd.append("paciente", p); fd.append("sesion", s); fd.append("estado", estado);
+  try {
+    const r = await api("/api/studies/revision", { method: "POST", body: fd });
+    if (!r.ok) throw new Error();
+    const row = libRows.find(x => x.paciente === p && x.sesion === s);
+    if (row) row.revision = estado;
+    if (stored && stored.sesion === s) $("rvestado").value = estado;
+    if (!quiet) setSaved(`Estado de revisión: ${REV[estado]}.`);
+    return true;
+  } catch { if (!quiet) setSaved("No se pudo guardar el estado de revisión."); return false; }
+}
+$("rvestado").onchange = e => setRevision(e.target.value);
+$("rvdone").onclick = async () => { if (await setRevision("revisada")) showTab("lib"); };
+
+async function loadStoredVideo() {
+  const st = t => { $("status").textContent = t; }, p = pid, s = sesion, fd = new FormData();
+  st("Buscando el video guardado…");
+  fd.append("paciente", p); fd.append("sesion", s);
+  let r; try { r = await api("/api/sessions/video-ticket", { method: "POST", body: fd }); } catch { st("Sin conexión con el servidor."); return; }
+  if (!stored || p !== pid || s !== sesion) return;
+  if (!r.ok) { st(r.status === 404 ? "Esta colonoscopia no tiene un video guardado completo." : `No se pudo abrir el video guardado (HTTP ${r.status}).`); return; }
+  const t = await r.json();
+  if (!t.reproducible) {
+    if (stored.prepared) st("El video guardado está en un formato que el navegador no reproduce y no se pudo convertir (¿FFmpeg instalado en el servidor?).");
+    else prepareStored();
+    return;
+  }
+  stored.src = t.url; stored.convertido = t.convertido;
+  if (curUrl) { URL.revokeObjectURL(curUrl); curUrl = null; }
+  vid.srcObject = null; vid.src = t.url; vid.load();
+  st("Cargando el video guardado…");
+}
+function storedFailed() {
+  if (!stored.retried) { stored.retried = true; loadStoredVideo(); return; }                    // ticket vencido o servidor reiniciado: pide otro
+  if (!stored.prepared && !stored.convertido) { prepareStored(); return; }                      // formato raro: se convierte una sola vez en el servidor
+  $("status").textContent = "No se pudo reproducir el video guardado.";
+}
+async function prepareStored() {
+  const p = pid, s = sesion, fd = new FormData(), st = t => { if (stored && p === pid && s === sesion) $("status").textContent = t; };
+  stored.prepared = true;
+  st("Preparando el video para verlo (se convierte una sola vez; puede tardar varios minutos)…");
+  fd.append("paciente", p); fd.append("sesion", s);
+  try { await api("/api/sessions/finalizar", { method: "POST", body: fd }); } catch { st("Sin conexión con el servidor."); return; }
+  let est = null;
+  for (let i = 0; i < 1440; i++) {              // hasta ~1 hora
+    await sleep(2500);
+    if (!stored || p !== pid || s !== sesion) return;
+    try { const r = await api(`/api/sessions/estado?paciente=${encodeURIComponent(p)}&sesion=${encodeURIComponent(s)}`); if (r.ok) est = (await r.json()).video_final; } catch { /* reintenta */ }
+    if (est && est.estado !== "procesando") break;
+  }
+  if (est && est.estado === "ok") { stored.retried = false; loadStoredVideo(); }
+  else st("No se pudo preparar el video para verlo: " + ((est && (est.detalle || est.estado)) || "tiempo agotado") + ".");
+}
 $("cam").onclick = async () => {
   let s;
   try { s = await navigator.mediaDevices.getUserMedia({ video: { width: 1280 }, audio: false }); }
   catch { $("status").textContent = "No se pudo abrir la cámara (¿HTTPS y permisos?)"; return; }
+  leaveStored();
   if (!(await beginSession("camara"))) { s.getTracks().forEach(t => t.stop()); return; }
   stopCam(); vid.removeAttribute("src"); vid.srcObject = s; vid.play();
   startRecording(s);
+  $("finish").hidden = false;
+};
+$("finish").onclick = () => {
+  if (!vid.srcObject) return;
+  if (!confirm("¿Finalizar la colonoscopia? Se detiene la cámara y se guarda el video completo junto con las notas en CSV.")) return;
+  const grabando = recorder && recorder.state !== "inactive";
+  stopCam();                          // detiene la grabación: el último trozo y la orden de finalizar salen en orden
+  setSaved(grabando ? "Finalizando: subiendo el último tramo del video…" : "Cámara detenida (esta colonoscopia ya tenía un video guardado).");
 };
 function stopCam() {
   loadTok++;
   if (recorder && recorder.state !== "inactive") recorder.stop();   // el último trozo se sube solo
   recorder = null;
   if (vid.srcObject) { vid.srcObject.getTracks().forEach(t => t.stop()); vid.srcObject = null; }
+  $("finish").hidden = true;
 }
 
 $("analysis").onclick = e => {
@@ -626,6 +852,7 @@ $("clear").onclick = clearMark;
 $("brush").oninput = e => { brush = +e.target.value; };
 $("tool").onclick = () => setTool(tool === "caja" ? "pincel" : "caja");
 document.addEventListener("keydown", e => {
+  if ($("main").hidden) return;
   if (e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT" || (e.target.tagName === "INPUT" && e.target.type === "text")) return;
   if (e.code === "Space") { e.preventDefault(); vid.paused ? vid.play() : vid.pause(); }
   else if (e.key === "a") vid.currentTime -= 1 / FPS;
@@ -638,13 +865,16 @@ document.addEventListener("keydown", e => {
   else if (e.key === "]") { brush = Math.min(60, brush + 3); $("brush").value = brush; }
 });
 
-$("dl").onclick = async () => {
+async function descargar(name, fname) {
   if (!sesion) return;
-  const r = await api(`/api/findings/file?paciente=${encodeURIComponent(pid)}&sesion=${encodeURIComponent(sesion)}&name=hallazgos.csv`);
+  const r = await api(`/api/findings/file?paciente=${encodeURIComponent(pid)}&sesion=${encodeURIComponent(sesion)}&name=${name}`);
   if (!r.ok) { setSaved("Aún no hay historial para descargar."); return; }
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(await r.blob()); a.download = "hallazgos.csv"; a.click();
-};
+  a.href = URL.createObjectURL(await r.blob()); a.download = fname; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+$("dl").onclick = () => descargar("hallazgos.csv", `hallazgos_${sesion}.csv`);
+$("dlnotes").onclick = () => descargar("notas.csv", `notas_${sesion}.csv`);
 
 /* ---------- tamaño del visor ---------- */
 function fit() {          // cada vista llena su columna sin pasar de «Tamaño» (% del alto de la ventana), manteniendo la proporción
@@ -791,8 +1021,8 @@ function toFD(parts) {
   for (const [k, v, name] of parts) name ? fd.append(k, v, name) : fd.append(k, v);
   return fd;
 }
-async function enqueue(method, url, body) {
-  const item = { uid: session && session.user.id, method, url, failed: false, creado: Date.now() };   // uid: nunca se envía con la cuenta de otro usuario
+async function enqueue(method, url, body, uid) {
+  const item = { uid: uid || (session && session.user.id), method, url, failed: false, creado: Date.now() };   // uid: nunca se envía con la cuenta de otro usuario
   if (body instanceof FormData) item.parts = [...body.entries()].map(([k, v]) => v instanceof Blob ? [k, v, v.name || "archivo"] : [k, v]);
   else item.body = body;
   await q.add(item);
@@ -886,7 +1116,7 @@ $("sync").onclick = async () => {
 };
 addEventListener("online", () => { backoff = 2000; drain(); });
 addEventListener("offline", () => { syncState.offline = true; setSync(); });
-addEventListener("beforeunload", e => { if (syncState.video || syncState.pend) { e.preventDefault(); e.returnValue = ""; } });
+addEventListener("beforeunload", e => { if (syncState.video || syncState.pend || (recorder && recorder.state === "recording")) { e.preventDefault(); e.returnValue = ""; } });
 /* ---------- fin sincronización ---------- */
 
 /* ---------- sesión (Supabase) ---------- */
@@ -909,6 +1139,7 @@ function applySession() {
     stopCam(); vid.pause(); vid.removeAttribute("src"); vid.load();
     sesion = ""; pid = ""; findings = []; notes = []; sel = null; marks.clear(); lastFrame = lastProb = null; renderList(); renderNotes(); updateTarget();
     $("pid").value = ""; $("sesinfo").textContent = ""; loadSessions(); if (listening) stopDictado();
+    stored = null; $("rvbar").hidden = true; libRows = []; $("libl").innerHTML = ""; showTab("visor");
     syncState.video = null; syncState.srv = null; syncState.videoError = ""; setSync();
   }
 }

@@ -18,6 +18,36 @@
       "mascara": "predictions/masks/mask_frame000000.png",
       "frame_img": "predictions/frames/frame000000.jpg",
       "miniatura": "metadata/miniaturas/automatico_frame000000.jpg"
+    },
+    {
+      "frame": 12,
+      "tiempo": "0:00.48",
+      "detectado": true,
+      "box": [
+        310,
+        75,
+        213,
+        229
+      ],
+      "umbral": 0.5,
+      "mascara": "predictions/masks/mask_frame000012.png",
+      "frame_img": "predictions/frames/frame000012.jpg",
+      "miniatura": "metadata/miniaturas/automatico_frame000012.jpg"
+    },
+    {
+      "frame": 42,
+      "tiempo": "0:01.68",
+      "detectado": true,
+      "box": [
+        306,
+        203,
+        117,
+        71
+      ],
+      "umbral": 0.5,
+      "mascara": "predictions/masks/mask_frame000042.png",
+      "frame_img": "predictions/frames/frame000042.jpg",
+      "miniatura": "metadata/miniaturas/automatico_frame000042.jpg"
     }
   ]
 }

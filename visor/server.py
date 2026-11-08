@@ -22,6 +22,7 @@ import io
 import os
 import re
 import json
+import secrets
 import shutil
 import tempfile
 import threading
@@ -33,7 +34,7 @@ import httpx
 import numpy as np
 import torch
 from fastapi import APIRouter, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
@@ -320,6 +321,56 @@ def link_notes(d):
             jwrite(path, data)
 
 
+# ---------- CSV: notas y hallazgos ----------
+# notas.csv queda en la carpeta de la colonoscopia (se reescribe con cada nota y al finalizar) y tambien se puede descargar desde el visor.
+# UTF-8 con BOM para que Excel muestre bien los acentos. Si tu Excel lo abre todo en una columna, arranca con CSV_SEP=";".
+CSV_SEP = os.environ.get("CSV_SEP", ",")[:1] or ","
+
+
+def _csv_safe(v):
+    """Evita que Excel interprete como formula un texto dictado que empiece por = + - @."""
+    v = "" if v is None else str(v)
+    return "'" + v if v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
+
+
+def notes_csv_text(d):
+    rows = []
+    for path, key, origen in ((P(d, "annotations", "descriptions.json"), "descripciones", "texto"),
+                              (P(d, "transcriptions", "transcript.json"), "transcripciones", "voz")):
+        rows += [(n.get("frame", 0), n.get("creado", ""), n, origen) for n in jread(path, {}).get(key, [])]
+    rows.sort(key=lambda r: (r[0], r[1]))
+    out = io.StringIO()
+    w = csv.writer(out, delimiter=CSV_SEP, lineterminator="\r\n")
+    w.writerow(["frame", "tiempo", "texto", "origen", "hallazgo", "hallazgos_en_frame", "creado"])
+    for frame, _, n, origen in rows:
+        w.writerow([frame, n.get("tiempo", ""), _csv_safe(n.get("texto", "")), origen, n.get("hallazgo", ""),
+                    "|".join(n.get("hallazgos_en_frame", [])), n.get("creado", "")])
+    return out.getvalue()
+
+
+def findings_csv_text(d):
+    rows = [["frame", "tiempo", "tipo", "forma", "x", "y", "ancho_caja", "alto_caja", "mascara", "frame_img"]]
+    for p in jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", []):
+        b = p.get("box") or ["", "", "", ""]
+        rows.append([p["frame"], p["tiempo"], "automatico", "", *b, p.get("mascara") or "", p.get("frame_img") or ""])
+    for c in jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", []):
+        b = c.get("box") or ["", "", "", ""]
+        rows.append([c["frame"], c["tiempo"], "manual", c.get("forma", ""), *b, c.get("mascara") or "", c.get("frame_img") or ""])
+    body = io.StringIO()
+    csv.writer(body).writerows(rows)
+    return body.getvalue()
+
+
+def write_notes_csv(d):
+    with open(P(d, "notas.csv"), "w", encoding="utf-8-sig", newline="") as f:
+        f.write(notes_csv_text(d))
+
+
+def refresh_notes_csv(d):          # al llegar un hallazgo nuevo cambia la columna hallazgos_en_frame de las notas ya guardadas
+    if os.path.exists(P(d, "notas.csv")):
+        write_notes_csv(d)
+
+
 # ---------- metadatos de los estudios en Supabase (tabla `estudios`, ver supabase_estudios.sql) ----------
 SUPABASE_TABLA = os.environ.get("SUPABASE_TABLA_ESTUDIOS", "estudios")
 SUPABASE_ACTIVO = os.environ.get("SUPABASE_SYNC_ESTUDIOS", "1") != "0" and bool(SUPABASE_URL and SUPABASE_ANON_KEY)
@@ -540,6 +591,7 @@ async def save_finding(paciente: str = Form(...), sesion: str = Form(...), frame
             meta["ancho"], meta["alto"] = ancho, alto
             jwrite(P(d, "metadata", "colonoscopy.json"), meta)
         link_notes(d)
+        refresh_notes_csv(d)
     sync_study(user, d, paciente, sesion)
     return {"ok": True}
 
@@ -574,6 +626,7 @@ async def save_note(paciente: str = Form(...), sesion: str = Form(...), frame: i
         data[key].sort(key=lambda x: x["frame"])
         jwrite(path, data)
         link_notes(d)
+        write_notes_csv(d)
     sync_study(user, d, paciente, sesion)
     return {"ok": True}
 
@@ -614,7 +667,10 @@ def session_status(paciente: str, sesion: str, user: dict = Depends(current_user
     estado = sb.get("estado", "pendiente") if SUPABASE_ACTIVO else "desactivado"
     if SUPABASE_ACTIVO and estado != "ok":
         sync_study(user, d, paciente, sesion)          # reintento en segundo plano
-    return {"video": meta.get("video"), "video_completo": video_completo(meta),
+    vf = meta.get("video_final")
+    if vf and vf.get("estado") == "procesando" and d not in _finalizing:
+        vf = {**vf, "estado": "interrumpido"}       # el servidor se reinicio mientras preparaba el MP4: se puede volver a finalizar
+    return {"video": meta.get("video"), "video_completo": video_completo(meta), "video_final": vf,
             "hallazgos": n_pred + n_caj, "notas": n_notas,
             "supabase": estado, "supabase_intento": sb.get("intento"), "supabase_detalle": sb.get("detalle")}
 
@@ -623,16 +679,13 @@ def session_status(paciente: str, sesion: str, user: dict = Depends(current_user
 def finding_file(paciente: str, sesion: str, name: str, user: dict = Depends(current_user)):
     d = session_dir(user, paciente, sesion)
     if name == "hallazgos.csv":      # resumen generado al vuelo a partir de los JSON
-        rows = [["frame", "tiempo", "tipo", "forma", "x", "y", "ancho_caja", "alto_caja", "mascara", "frame_img"]]
-        for p in jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", []):
-            b = p.get("box") or ["", "", "", ""]
-            rows.append([p["frame"], p["tiempo"], "automatico", "", *b, p.get("mascara") or "", p.get("frame_img") or ""])
-        for c in jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", []):
-            b = c.get("box") or ["", "", "", ""]
-            rows.append([c["frame"], c["tiempo"], "manual", c.get("forma", ""), *b, c.get("mascara") or "", c.get("frame_img") or ""])
-        body = io.StringIO()
-        csv.writer(body).writerows(rows)
-        return Response(body.getvalue(), media_type="text/csv; charset=utf-8")
+        return Response(findings_csv_text(d), media_type="text/csv; charset=utf-8")
+    if name == "notas.csv":
+        if not os.path.isdir(d):
+            raise HTTPException(404, "La colonoscopia no existe")
+        with history_lock:
+            body = notes_csv_text(d)
+        return Response(body.encode("utf-8-sig"), media_type="text/csv; charset=utf-8")
     rel = os.path.normpath(name)
     path = os.path.realpath(os.path.join(d, rel))
     if rel.startswith("..") or os.path.isabs(rel) or not path.startswith(os.path.realpath(d) + os.sep) or not os.path.isfile(path):
@@ -648,11 +701,13 @@ CONVERT_TIMEOUT = int(os.environ.get("CONVERT_TIMEOUT_S", str(2 * 3600)))
 _convert_slots = asyncio.Semaphore(int(os.environ.get("MAX_CONVERSIONS", "2")))
 
 
-async def _run_ffmpeg(ffmpeg, src, dst, fps_flag):
-    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-map", "0:v:0",
-           "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",              # yuv420p exige ancho y alto pares
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
-           *fps_flag,                                               # conserva los tiempos originales: el numero de frame no cambia
+async def _run_ffmpeg(ffmpeg, src, dst, fps_flag, copy=False):
+    if copy:                                                        # remux: sin recodificar, sin perdida y casi instantaneo
+        vcodec = ["-c:v", "copy"]
+    else:
+        vcodec = ["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",       # yuv420p exige ancho y alto pares
+                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", *fps_flag]   # fps: conserva los tiempos originales
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-map", "0:v:0", *vcodec,
            "-an", "-movflags", "+faststart", dst]
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     try:
@@ -696,6 +751,216 @@ async def video_compatible(request: Request, ext: str = ".bin", user: dict = Dep
         if not keep:
             shutil.rmtree(tmp, ignore_errors=True)
 # --- fin conversion de video ---
+
+
+# --- finalizar colonoscopia: video completo en MP4 + CSV ---
+# Al terminar la camara el visor sube el ultimo trozo y llama aqui. El video que graba el navegador (webm, o mp4 fragmentado)
+# no tiene duracion ni se puede navegar bien, asi que se deja una copia limpia en video/colonoscopia.mp4 (el original se conserva).
+_finalizing = set()
+_bg_tasks = set()
+
+
+def _set_video_final(d, info):
+    with history_lock:
+        meta = jread(P(d, "metadata", "colonoscopy.json"), {})
+        meta["video_final"] = info
+        jwrite(P(d, "metadata", "colonoscopy.json"), meta)
+
+
+async def _make_final_video(d, rel):
+    src, dst = P(d, *rel.split("/")), P(d, "video", "colonoscopia.mp4")
+    tmp = P(d, "video", "colonoscopia.part.mp4")
+    inicio = now_iso()
+    try:
+        _set_video_final(d, {"estado": "procesando", "inicio": inicio})
+        ffmpeg = shutil.which("ffmpeg")
+        if not os.path.isfile(src) or not os.path.getsize(src):
+            _set_video_final(d, {"estado": "sin_video", "inicio": inicio})
+            return
+        if not ffmpeg:
+            _set_video_final(d, {"estado": "sin_ffmpeg", "inicio": inicio, "archivo": rel,
+                                 "detalle": "FFmpeg no esta instalado en el servidor; el video quedo en su formato original"})
+            return
+        modos = (["copia"] if src.lower().endswith((".mp4", ".m4v", ".mov")) else []) + ["x264"]
+        ok, err = False, ""
+        for modo in modos:
+            copy = modo == "copia"
+            async with _convert_slots:
+                rc, err = await _run_ffmpeg(ffmpeg, src, tmp, [] if copy else ["-fps_mode", "passthrough"], copy)
+                if rc != 0 and "fps_mode" in err:                   # FFmpeg anterior a 5.1
+                    rc, err = await _run_ffmpeg(ffmpeg, src, tmp, ["-vsync", "0"], copy)
+            if rc == 0 and os.path.isfile(tmp) and os.path.getsize(tmp):
+                ok = True
+                break
+        if ok:
+            os.replace(tmp, dst)
+            _set_video_final(d, {"estado": "ok", "inicio": inicio, "fin": now_iso(), "archivo": "video/colonoscopia.mp4",
+                                 "bytes": os.path.getsize(dst), "modo": modo})
+        else:
+            _set_video_final(d, {"estado": "error", "inicio": inicio, "archivo": rel, "detalle": err.strip()[-300:] or "sin detalle"})
+    except HTTPException as e:
+        _set_video_final(d, {"estado": "error", "inicio": inicio, "archivo": rel, "detalle": str(e.detail)})
+    except Exception as e:                                          # el original nunca se toca: siempre se puede reintentar
+        _set_video_final(d, {"estado": "error", "inicio": inicio, "archivo": rel, "detalle": f"{type(e).__name__}: {e}"})
+    finally:
+        _finalizing.discard(d)
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+@router.post("/api/sessions/finalizar")
+async def finalize_session(paciente: str = Form(...), sesion: str = Form(...), user: dict = Depends(current_user)):
+    d = session_dir(user, paciente, sesion)
+    if not os.path.isdir(d):
+        raise HTTPException(404, "La colonoscopia no existe")
+    with history_lock:
+        link_notes(d)
+        write_notes_csv(d)                                          # notas.csv y hallazgos.csv quedan en la carpeta de la colonoscopia
+        with open(P(d, "hallazgos.csv"), "w", encoding="utf-8-sig", newline="") as f:
+            f.write(findings_csv_text(d))
+        meta = jread(P(d, "metadata", "colonoscopy.json"), {})
+    v = meta.get("video")
+    if d in _finalizing:
+        return {"ok": True, "estado": "procesando"}
+    if not v:
+        _set_video_final(d, {"estado": "sin_video"})
+        return {"ok": True, "estado": "sin_video"}
+    _finalizing.add(d)                                              # se registra antes de responder: el visor consulta el estado enseguida
+    _set_video_final(d, {"estado": "procesando", "inicio": now_iso()})
+    task = asyncio.create_task(_make_final_video(d, v["archivo"]))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return {"ok": True, "estado": "procesando"}
+# --- fin finalizar colonoscopia ---
+
+
+# --- videos guardados: lista, estado de revision y reproduccion ---
+# Las colonoscopias se graban/suben primero y el medico las revisa despues. El <video> del navegador no puede mandar el token de
+# login, asi que el visor pide un "ticket" (aleatorio, vence en 8 h, solo sirve para ese archivo) y reproduce api/video/<ticket>.
+# El servidor responde por rangos (206): se puede avanzar y retroceder sin descargar todo el video.
+REVISION_ESTADOS = ("pendiente", "en_revision", "revisada")
+PLAYABLE = {".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm"}      # lo que el navegador reproduce de forma fiable
+TICKET_TTL = 8 * 3600
+_tickets = {}
+
+
+def _study_dirs(user):
+    root = user_dir(user)
+    if not os.path.isdir(root):
+        return
+    for pn in sorted(os.listdir(root)):
+        pdir = os.path.join(root, pn)
+        paciente = pn[len("paciente_"):]
+        if not (pn.startswith("paciente_") and PID_RE.match(paciente) and os.path.isdir(pdir)):
+            continue
+        for sn in sorted(os.listdir(pdir)):
+            d = os.path.join(pdir, sn)
+            if SESION_RE.match(sn) and os.path.isdir(d):
+                yield paciente, sn, d
+
+
+@router.get("/api/studies")
+def list_studies(user: dict = Depends(current_user)):
+    """Todas las colonoscopias de la cuenta (de todos los pacientes), la mas reciente primero."""
+    out = []
+    with history_lock:
+        for paciente, sesion, d in _study_dirs(user):
+            meta = jread(P(d, "metadata", "colonoscopy.json"), {})
+            n_pred, n_caj, n_notas = study_counts(d)
+            v, rev = meta.get("video") or {}, meta.get("revision") or {}
+            out.append({"paciente": paciente, "sesion": sesion, "creado": meta.get("creado", ""), "fuente": meta.get("fuente", ""),
+                        "hallazgos": n_pred + n_caj, "notas": n_notas,
+                        "video": "listo" if video_completo(meta) else ("incompleto" if v else "ninguno"),
+                        "video_bytes": v.get("bytes"),
+                        "revision": rev.get("estado", "pendiente"), "revision_fecha": rev.get("fecha"), "revision_por": rev.get("por")})
+    out.sort(key=lambda r: r["creado"] or "", reverse=True)
+    return out
+
+
+@router.post("/api/studies/revision")
+def set_revision(paciente: str = Form(...), sesion: str = Form(...), estado: str = Form(...), user: dict = Depends(current_user)):
+    if estado not in REVISION_ESTADOS:
+        raise HTTPException(400, "Estado de revision invalido")
+    d = session_dir(user, paciente, sesion)
+    if not os.path.isdir(d):
+        raise HTTPException(404, "La colonoscopia no existe")
+    with history_lock:
+        meta = jread(P(d, "metadata", "colonoscopy.json"), {})
+        meta["revision"] = {"estado": estado, "fecha": now_iso(), "por": user.get("email", "")}
+        jwrite(P(d, "metadata", "colonoscopy.json"), meta)
+    return meta["revision"]
+
+
+@router.post("/api/sessions/video-ticket")
+def video_ticket(paciente: str = Form(...), sesion: str = Form(...), user: dict = Depends(current_user)):
+    d = session_dir(user, paciente, sesion)
+    if not os.path.isdir(d):
+        raise HTTPException(404, "La colonoscopia no existe")
+    with history_lock:
+        meta = jread(P(d, "metadata", "colonoscopy.json"), {})
+    v = meta.get("video")
+    final = P(d, "video", "colonoscopia.mp4")
+    final = final if (meta.get("video_final") or {}).get("estado") == "ok" and os.path.isfile(final) else None
+    original = P(d, *v["archivo"].split("/")) if v and video_completo(meta) else None
+    path = final or (original if original and os.path.isfile(original) else None)
+    if not path:
+        raise HTTPException(404, "Esta colonoscopia no tiene un video guardado completo")
+    ext = os.path.splitext(path)[1].lower()
+    now = time.time()
+    for k in [k for k, t in _tickets.items() if t["exp"] < now]:
+        del _tickets[k]
+    while len(_tickets) >= 500:
+        _tickets.pop(next(iter(_tickets)))
+    tk = secrets.token_urlsafe(24)
+    _tickets[tk] = {"path": path, "exp": now + TICKET_TTL, "mime": PLAYABLE.get(ext, "application/octet-stream")}
+    return {"url": f"api/video/{tk}", "formato": ext, "reproducible": ext in PLAYABLE, "convertido": path == final,
+            "bytes": os.path.getsize(path)}
+
+
+def _byte_range(header, size):
+    """'bytes=a-b' | 'bytes=a-' | 'bytes=-n' -> (inicio, fin) inclusivos; None si no es un rango; ValueError si no se puede satisfacer."""
+    m = re.match(r"^bytes=(\d*)-(\d*)$", (header or "").strip())
+    if not m or (not m.group(1) and not m.group(2)):
+        return None
+    if not m.group(1):
+        start, end = max(0, size - int(m.group(2))), size - 1
+    else:
+        start, end = int(m.group(1)), min(int(m.group(2)) if m.group(2) else size - 1, size - 1)
+    if start > end or start >= size:
+        raise ValueError
+    return start, end
+
+
+def _iter_file(path, start, end, chunk=1 << 20):
+    with open(path, "rb") as f:
+        f.seek(start)
+        left = end - start + 1
+        while left > 0:
+            b = f.read(min(chunk, left))
+            if not b:
+                break
+            left -= len(b)
+            yield b
+
+
+@router.get("/api/video/{ticket}")
+def stream_video(ticket: str, request: Request):
+    t = _tickets.get(ticket)
+    if not t or t["exp"] < time.time() or not os.path.isfile(t["path"]):
+        raise HTTPException(404, "El enlace del video vencio; vuelve a abrir la colonoscopia")
+    size = os.path.getsize(t["path"])
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "private, no-store"}
+    try:
+        rng = _byte_range(request.headers.get("range"), size)
+    except ValueError:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+    if rng:
+        start, end = rng
+        headers.update({"Content-Range": f"bytes {start}-{end}/{size}", "Content-Length": str(end - start + 1)})
+        return StreamingResponse(_iter_file(t["path"], start, end), status_code=206, media_type=t["mime"], headers=headers)
+    headers["Content-Length"] = str(size)
+    return StreamingResponse(_iter_file(t["path"], 0, size - 1), media_type=t["mime"], headers=headers)
+# --- fin videos guardados ---
 
 
 @router.get("/")

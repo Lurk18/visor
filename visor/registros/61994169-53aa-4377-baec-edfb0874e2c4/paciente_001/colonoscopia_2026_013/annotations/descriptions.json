@@ -1,3 +1,15 @@
 {
-  "descripciones": []
+  "descripciones": [
+    {
+      "frame": 42,
+      "tiempo": "0:01.68",
+      "texto": "paciente con cara de gay",
+      "creado": "2026-11-08T02:14:44",
+      "id": "ae33c0cb-5e83-4213-b5b6-f84ab7e3bdf2",
+      "hallazgo": "automatico",
+      "hallazgos_en_frame": [
+        "automatico"
+      ]
+    }
+  ]
 }

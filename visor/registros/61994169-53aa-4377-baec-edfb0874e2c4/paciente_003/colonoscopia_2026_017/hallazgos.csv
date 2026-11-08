@@ -1,0 +1,4 @@
+﻿frame,tiempo,tipo,forma,x,y,ancho_caja,alto_caja,mascara,frame_img
+0,0:00.00,automatico,,354,161,37,56,predictions/masks/mask_frame000000.png,predictions/frames/frame000000.jpg
+73,0:02.92,automatico,,395,116,43,52,predictions/masks/mask_frame000073.png,predictions/frames/frame000073.jpg
+157,0:06.28,automatico,,434,194,49,46,predictions/masks/mask_frame000157.png,predictions/frames/frame000157.jpg
