@@ -10,10 +10,23 @@
     "total": 134661560,
     "actualizado": "2026-11-07T01:51:17"
   },
-  "ancho": null,
-  "alto": null,
+  "ancho": 640,
+  "alto": 360,
   "supabase": {
     "estado": "ok",
-    "intento": "2026-11-07T01:51:18"
+    "intento": "2026-11-08T19:53:10"
+  },
+  "revision": {
+    "estado": "en_revision",
+    "fecha": "2026-11-08T19:52:26",
+    "por": "uverdesav@gmail.com"
+  },
+  "video_final": {
+    "estado": "ok",
+    "inicio": "2026-11-08T19:52:26",
+    "fin": "2026-11-08T19:52:39",
+    "archivo": "video/colonoscopia.mp4",
+    "bytes": 80155475,
+    "modo": "x264"
   }
 }

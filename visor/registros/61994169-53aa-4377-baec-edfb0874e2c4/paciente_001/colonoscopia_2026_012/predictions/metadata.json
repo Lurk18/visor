@@ -1,7 +1,76 @@
 {
   "modelo": "best_model.pth",
   "criterio": "un registro al iniciar cada deteccion",
-  "ancho": null,
-  "alto": null,
-  "predicciones": []
+  "ancho": 640,
+  "alto": 360,
+  "predicciones": [
+    {
+      "frame": 18,
+      "tiempo": "0:00.72",
+      "detectado": true,
+      "box": [
+        365,
+        116,
+        51,
+        60
+      ],
+      "umbral": 0.5,
+      "mascara": "predictions/masks/mask_frame000018.png",
+      "frame_img": "predictions/frames/frame000018.jpg",
+      "miniatura": "metadata/miniaturas/automatico_frame000018.jpg"
+    },
+    {
+      "frame": 64,
+      "tiempo": "0:02.56",
+      "detectado": true,
+      "box": [
+        408,
+        114,
+        32,
+        52
+      ],
+      "umbral": 0.5,
+      "mascara": "predictions/masks/mask_frame000064.png",
+      "frame_img": "predictions/frames/frame000064.jpg",
+      "miniatura": "metadata/miniaturas/automatico_frame000064.jpg",
+      "descartado": {
+        "fecha": "2026-11-08T19:53:08",
+        "por": "uverdesav@gmail.com"
+      }
+    },
+    {
+      "frame": 108,
+      "tiempo": "0:04.32",
+      "detectado": true,
+      "box": [
+        334,
+        217,
+        32,
+        22
+      ],
+      "umbral": 0.5,
+      "mascara": "predictions/masks/mask_frame000108.png",
+      "frame_img": "predictions/frames/frame000108.jpg",
+      "miniatura": "metadata/miniaturas/automatico_frame000108.jpg",
+      "descartado": {
+        "fecha": "2026-11-08T19:53:06",
+        "por": "uverdesav@gmail.com"
+      }
+    },
+    {
+      "frame": 139,
+      "tiempo": "0:05.56",
+      "detectado": true,
+      "box": [
+        383,
+        168,
+        66,
+        63
+      ],
+      "umbral": 0.5,
+      "mascara": "predictions/masks/mask_frame000139.png",
+      "frame_img": "predictions/frames/frame000139.jpg",
+      "miniatura": "metadata/miniaturas/automatico_frame000139.jpg"
+    }
+  ]
 }

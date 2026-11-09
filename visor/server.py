@@ -305,9 +305,11 @@ def link_notes(d):
     """Cada nota (descripcion o transcripcion) lista los hallazgos que hay en su mismo frame."""
     frames = {}
     for p in jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", []):
-        frames.setdefault(p["frame"], []).append("automatico")
+        if not p.get("descartado"):
+            frames.setdefault(p["frame"], []).append("automatico")
     for c in jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", []):
-        frames.setdefault(c["frame"], []).append("manual")
+        if not c.get("descartado"):
+            frames.setdefault(c["frame"], []).append("manual")
     for path, key in ((P(d, "annotations", "descriptions.json"), "descripciones"),
                       (P(d, "transcriptions", "transcript.json"), "transcripciones")):
         data = jread(path, {})
@@ -351,9 +353,13 @@ def notes_csv_text(d):
 def findings_csv_text(d):
     rows = [["frame", "tiempo", "tipo", "forma", "x", "y", "ancho_caja", "alto_caja", "mascara", "frame_img"]]
     for p in jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", []):
+        if p.get("descartado"):
+            continue
         b = p.get("box") or ["", "", "", ""]
         rows.append([p["frame"], p["tiempo"], "automatico", "", *b, p.get("mascara") or "", p.get("frame_img") or ""])
     for c in jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", []):
+        if c.get("descartado"):
+            continue
         b = c.get("box") or ["", "", "", ""]
         rows.append([c["frame"], c["tiempo"], "manual", c.get("forma", ""), *b, c.get("mascara") or "", c.get("frame_img") or ""])
     body = io.StringIO()
@@ -391,8 +397,9 @@ def _iso_local(texto):
 
 
 def study_counts(d):
-    return (len(jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", [])),
-            len(jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", [])),
+    vivos = lambda xs: len([x for x in xs if not x.get("descartado")])
+    return (vivos(jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", [])),
+            vivos(jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", [])),
             len(jread(P(d, "annotations", "descriptions.json"), {}).get("descripciones", []))
             + len(jread(P(d, "transcriptions", "transcript.json"), {}).get("transcripciones", [])))
 
@@ -484,8 +491,7 @@ def list_sessions(paciente: str, user: dict = Depends(current_user)):
                     continue
                 meta = jread(P(d, "metadata", "colonoscopy.json"), {})
                 out.append({"sesion": n, "creado": meta.get("creado", ""), "fuente": meta.get("fuente", ""),
-                            "hallazgos": len(jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", []))
-                                         + len(jread(P(d, "annotations", "bounding_boxes.json"), {}).get("cajas", [])),
+                            "hallazgos": sum(study_counts(d)[:2]),
                             "tiene_video": video_completo(meta)})
     return out
 
@@ -526,6 +532,9 @@ async def upload_video(request: Request, paciente: str, sesion: str, ext: str = 
     return {"ok": True, "bytes": meta["video"]["bytes"]}
 
 
+DESCARTE_VENTANA = int(os.environ.get("DESCARTE_VENTANA_FRAMES", "50"))     # +-2 s a 25 fps
+
+
 def upsert(items, frame, entry):
     items[:] = [x for x in items if x["frame"] != frame] + [entry]
     items.sort(key=lambda x: x["frame"])
@@ -561,6 +570,9 @@ async def save_finding(paciente: str = Form(...), sesion: str = Form(...), frame
              "mask": f"annotations/manual_masks/mask_frame{n}.png",
              "pred": f"predictions/masks/mask_frame{n}.png"}
     with history_lock:
+        if auto and any(x.get("descartado") and abs(x["frame"] - frame) <= DESCARTE_VENTANA
+                        for x in jread(P(d, "predictions", "metadata.json"), {}).get("predicciones", [])):
+            return {"ok": True, "ignorado": "descartado"}      # el medico ya descarto una deteccion aqui: no se vuelve a crear
         for k, rel in paths.items():
             if data[k]:
                 with open(P(d, *rel.split("/")), "wb") as f:
@@ -594,6 +606,38 @@ async def save_finding(paciente: str = Form(...), sesion: str = Form(...), frame
         refresh_notes_csv(d)
     sync_study(user, d, paciente, sesion)
     return {"ok": True}
+
+
+@router.post("/api/findings/descartar")
+async def discard_finding(paciente: str = Form(...), sesion: str = Form(...), frame: int = Form(...), tipo: str = Form(...),
+                          restaurar: str = Form(""), user: dict = Depends(current_user)):
+    """Descarta (o restaura) un hallazgo, p. ej. un falso positivo del modelo. No borra nada: el registro y sus imagenes quedan
+    en disco marcados como 'descartado' (sirven como ejemplos negativos). Desaparece de la lista, del CSV y de los conteos.
+    Es idempotente y no falla si el hallazgo no existe, para que la cola de envio del visor no se atasque."""
+    if tipo not in ("automatico", "manual") or frame < 0:
+        raise HTTPException(400, "Datos invalidos")
+    d = session_dir(user, paciente, sesion)
+    if not os.path.isdir(d):
+        raise HTTPException(404, "La colonoscopia no existe")
+    fp, key = ((P(d, "predictions", "metadata.json"), "predicciones") if tipo == "automatico"
+               else (P(d, "annotations", "bounding_boxes.json"), "cajas"))
+    found = False
+    with history_lock:
+        data = jread(fp, {})
+        for e in data.get(key, []):
+            if e["frame"] == frame:
+                found = True
+                if restaurar:
+                    e.pop("descartado", None)
+                elif not e.get("descartado"):
+                    e["descartado"] = {"fecha": now_iso(), "por": user.get("email", "")}
+        if found:
+            jwrite(fp, data)
+            link_notes(d)
+            refresh_notes_csv(d)
+    if found:
+        sync_study(user, d, paciente, sesion)
+    return {"ok": True, "encontrado": found}
 
 
 @router.post("/api/notes")
@@ -643,12 +687,16 @@ def list_findings(paciente: str, sesion: str, user: dict = Depends(current_user)
         notas = (jread(P(d, "annotations", "descriptions.json"), {}).get("descripciones", [])
                  + jread(P(d, "transcriptions", "transcript.json"), {}).get("transcripciones", []))
         meta = jread(P(d, "metadata", "colonoscopy.json"), {})
-    items = ([{"frame": p["frame"], "tiempo": p["tiempo"], "tipo": "automatico", "forma": "",
-               "thumb": url(p["miniatura"]), "mask": None} for p in pred]
-             + [{"frame": c["frame"], "tiempo": c["tiempo"], "tipo": "manual", "forma": c.get("forma", ""),
-                 "thumb": url(c["miniatura"]), "mask": url(c["mascara"]) if c.get("mascara") else None} for c in cajas])
+    mk_p = lambda p: {"frame": p["frame"], "tiempo": p["tiempo"], "tipo": "automatico", "forma": "",
+                      "thumb": url(p["miniatura"]), "mask": None}
+    mk_c = lambda c: {"frame": c["frame"], "tiempo": c["tiempo"], "tipo": "manual", "forma": c.get("forma", ""),
+                      "thumb": url(c["miniatura"]), "mask": url(c["mascara"]) if c.get("mascara") else None}
+    items = [mk_p(p) for p in pred if not p.get("descartado")] + [mk_c(c) for c in cajas if not c.get("descartado")]
+    gone = ([{**mk_p(p), "descartado": p["descartado"]} for p in pred if p.get("descartado")]
+            + [{**mk_c(c), "descartado": c["descartado"]} for c in cajas if c.get("descartado")])
     items.sort(key=lambda r: r["frame"])
-    return {"hallazgos": items,
+    gone.sort(key=lambda r: r["frame"])
+    return {"hallazgos": items, "descartados": gone, "ventana_descarte": DESCARTE_VENTANA,
             "notas": sorted(({"frame": n["frame"], "texto": n["texto"], "hallazgo": n.get("hallazgo", "")} for n in notas),
                             key=lambda n: n["frame"]),
             "tiene_video": video_completo(meta), "video": meta.get("video")}

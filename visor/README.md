@@ -23,6 +23,12 @@ Abre http://localhost:8000. Para usar la cámara desde otro equipo se necesita H
 - Atajos: `e` anotar, `g` guardar marca, `c` borrar marca, `[` `]` pincel, `a`/`d` ±1 frame, espacio pausa.
   Clic izquierdo pinta, clic derecho borra.
 - El número de frame se calcula con 25 fps asumidos (el navegador no expone el fps real).
+- **Descartar hallazgos (p. ej. falsos positivos del modelo):** cada hallazgo del panel tiene un botón ✕ (y la barra de nota tiene
+  «Descartar hallazgo» cuando hay uno elegido). No se borra nada: el registro queda marcado como `descartado` en
+  `predictions/metadata.json` o `annotations/bounding_boxes.json`, con las imágenes en disco (sirven como ejemplos negativos).
+  Sale de la lista, de `hallazgos.csv` y de los conteos; la sección «Descartados» permite restaurarlo. Si se descarta uno automático,
+  el modelo no vuelve a crear detecciones a ±50 frames (±2 s a 25 fps; ajustable con `DESCARTE_VENTANA_FRAMES`). Las notas ligadas a
+  un hallazgo descartado se conservan.
 - **Videos guardados (revisión posterior):** la pestaña «Videos guardados» lista todas las colonoscopias de la cuenta (paciente, fecha,
   video, hallazgos, notas y estado de revisión: Pendiente / En revisión / Revisada). «Revisar» abre el video guardado en el visor, con sus
   hallazgos y notas, para analizarlo y anotarlo como siempre; al abrirlo pasa a «En revisión» y «Marcar revisada y volver a la lista»

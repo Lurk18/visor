@@ -62,6 +62,13 @@
   #mic.on { background:#7a2f3a; }
   main[hidden], #library[hidden] { display:none; }
   button:disabled { opacity:.4; cursor:not-allowed; }
+  .find .rm { flex:none; padding:4px 8px; font-size:13px; background:transparent; color:var(--muted); border:1px solid var(--line); }
+  .find .rm:hover { background:#5a2a31; color:#fff; border-color:#7a2f3a; }
+  #disc { margin-top:10px; }
+  #disc summary { cursor:pointer; color:var(--muted); font-size:13px; }
+  .find.gone { cursor:default; }
+  .find.gone img { opacity:.45; filter:grayscale(1); }
+  .find.gone .rs { flex:none; padding:4px 8px; font-size:13px; }
   #tabs { display:flex; gap:4px; }
   #tabs button { background:transparent; border-radius:0; border-bottom:2px solid transparent; padding:6px 12px; color:var(--muted); }
   #tabs button.on { color:var(--text); border-bottom-color:var(--accent); background:#25574f33; }
@@ -171,6 +178,11 @@
     <h2>Hallazgos (<span id="count">0</span>)</h2>
     <p id="saved" class="empty" aria-live="polite"></p>
     <div id="list"><p class="empty">Aún no hay hallazgos. Se registran cuando aparece un pólipo.</p></div>
+    <details id="disc" hidden>
+      <summary>Descartados (<span id="dcount">0</span>)</summary>
+      <p class="muted" style="font-size:12px;margin:6px 0">No salen en el CSV. El servidor los conserva y se pueden restaurar.</p>
+      <div id="dlist"></div>
+    </details>
     <h2 style="margin-top:14px">Notas (<span id="ncount">0</span>)</h2>
     <div id="nlist"><p class="empty">Sin notas.</p></div>
   </aside>
@@ -211,6 +223,7 @@ const PID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;   // ID que da el hospital
 let annotate = false, brush = 15, painting = null, lastPt = null;
 const marks = new Map();          // frame -> canvas con la marca manual (blanco = marcado)
 let sel = null;                   // hallazgo elegido para ponerle una nota: { key, tipo }
+let discarded = [], discWin = 50; // hallazgos descartados por el médico y ventana (frames) en la que el modelo no vuelve a marcar
 
 const fmt = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(2).padStart(5, "0")}`;
 const blobOf = (c, t) => new Promise(r => c.toBlob(r, t, 0.85));
@@ -241,7 +254,7 @@ function connect() {
     shownKey = sentKey;
     inflight = false;
     const r = render();
-    if (r.detected && !hadDetection && !findings.some(f => f.key === shownKey && f.tipo === "automatico"))
+    if (r.detected && !hadDetection && !findings.some(f => f.key === shownKey && f.tipo === "automatico") && !isDiscardedAuto(shownKey))
       pushFinding({ tipo: "automatico", key: shownKey, box: r.box });
     hadDetection = r.detected;
   };
@@ -415,6 +428,7 @@ async function pushFinding({ tipo, key, box, forma = "", maskCanvas }) {
   if (!sesion || !lastFrame) return;
   const thumb = thumbOf(box);
   findings = findings.filter(f => !(f.key === key && f.tipo === tipo));
+  discarded = discarded.filter(d => !(d.key === key && d.tipo === tipo));
   findings.push({ key, tipo, src: thumb.toDataURL("image/jpeg", 0.8) });
   findings.sort((a, b) => a.key - b.key);
   renderList();
@@ -440,8 +454,65 @@ async function pushFinding({ tipo, key, box, forma = "", maskCanvas }) {
 
 function setSaved(t) { $("saved").textContent = t; }
 
+/* ---------- descartar hallazgos (p. ej. falsos positivos del modelo) ---------- */
+// No se borra nada: el servidor marca el registro como «descartado» (sale de la lista y del CSV, pero se conserva y se puede restaurar).
+const isDiscardedAuto = k => discarded.some(d => d.tipo === "automatico" && Math.abs(d.key - k) <= discWin);
+async function sendDiscard(key, tipo, restaurar) {
+  const fd = new FormData();
+  fd.append("paciente", pid); fd.append("sesion", sesion); fd.append("frame", key); fd.append("tipo", tipo);
+  if (restaurar) fd.append("restaurar", "1");
+  await enqueue("POST", "/api/findings/descartar", fd);          // por la cola: sale DESPUÉS del envío del hallazgo, aunque no haya conexión
+}
+async function discardFinding(f) {
+  if (!sesion || !findings.includes(f)) return;
+  const auto = f.tipo === "automatico";
+  if (!confirm(`¿Descartar el hallazgo ${auto ? "automático" : "manual"} del frame ${f.key} (${fmt(f.key / FPS)})?\n\n` +
+      "Se quita de la lista y del CSV de hallazgos. El registro se conserva como descartado y puedes restaurarlo." +
+      (auto ? `\nEl modelo no volverá a marcar este punto (±${Math.round(discWin / FPS)} s) en esta colonoscopia.` : ""))) return;
+  const mark = f.tipo === "manual" ? marks.get(f.key) || null : null;
+  findings = findings.filter(x => x !== f);
+  discarded.push({ key: f.key, tipo: f.tipo, forma: mark && mark.forma || "pincel", src: f.src, mark, maskUrl: null });
+  discarded.sort((a, b) => a.key - b.key);
+  if (f.tipo === "manual") marks.delete(f.key);
+  if (sel && sel.key === f.key && sel.tipo === f.tipo) sel = null;
+  renderList(); updateTarget(); render();
+  await sendDiscard(f.key, f.tipo, false);
+  setSaved("Hallazgo descartado; sincronizando…");
+}
+async function restoreFinding(d) {
+  if (!discarded.includes(d)) return;
+  discarded = discarded.filter(x => x !== d);
+  findings.push({ key: d.key, tipo: d.tipo, src: d.src }); findings.sort((a, b) => a.key - b.key);
+  if (d.tipo === "manual") {                                       // la marca vuelve a dibujarse sobre el frame
+    try {
+      const c = d.mark || (d.maskUrl ? alphaFromGray(await createImageBitmap(await (await api(d.maskUrl)).blob())) : null);
+      if (c) { c.forma = d.forma || "pincel"; marks.set(d.key, c); }
+    } catch { /* sin máscara: el hallazgo vuelve igual */ }
+  }
+  renderList(); render();
+  await sendDiscard(d.key, d.tipo, true);
+  setSaved("Hallazgo restaurado; sincronizando…");
+}
+function renderDiscarded() {
+  $("dcount").textContent = discarded.length; $("disc").hidden = !discarded.length;
+  const l = $("dlist"); l.innerHTML = "";
+  for (const d of discarded) {
+    const row = document.createElement("div"); row.className = "find gone";
+    const img = new Image(); img.alt = "Hallazgo descartado"; img.src = d.src;
+    const info = document.createElement("span"), tag = document.createElement("b");
+    tag.className = "tag " + d.tipo; tag.textContent = d.tipo === "manual" ? "Manual" : "Automático";
+    info.append(tag, document.createElement("br"), document.createTextNode(`${fmt(d.key / FPS)} · frame ${d.key}`));
+    const b = document.createElement("button"); b.className = "rs"; b.textContent = "Restaurar"; b.onclick = () => restoreFinding(d);
+    row.append(img, info, b);
+    row.onclick = e => { if (e.target !== b && !vid.srcObject) { vid.pause(); try { vid.currentTime = d.key / FPS; } catch {} } };   // ver el frame antes de decidir
+    l.appendChild(row);
+  }
+}
+
+
 function renderList() {
   $("count").textContent = findings.length;
+  renderDiscarded();
   const list = $("list"); list.innerHTML = "";
   if (!findings.length) {
     list.innerHTML = '<p class="empty">Aún no hay hallazgos. Se registran cuando aparece un pólipo o al guardar una marca.</p>';
@@ -460,9 +531,12 @@ function renderList() {
       const p = document.createElement("span"); p.className = "fnote"; p.title = n.texto; p.textContent = "📝 " + n.texto;
       info.append(p);
     }
-    row.append(img, info);
+    const rm = document.createElement("button"); rm.className = "rm"; rm.textContent = "✕"; rm.title = "Descartar este hallazgo (por ejemplo, si el modelo se equivocó)";
+    rm.setAttribute("aria-label", `Descartar el hallazgo ${f.tipo} del frame ${f.key}`);
+    rm.onclick = e => { e.stopPropagation(); discardFinding(f); };
+    row.append(img, info, rm);
     row.onclick = () => selectFinding(f);
-    row.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectFinding(f); } };
+    row.onkeydown = e => { if (e.target === row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); selectFinding(f); } };
     list.appendChild(row);
   }
 }
@@ -483,7 +557,9 @@ function updateTarget() {
   const b = document.createElement("b");
   b.textContent = `Nota para el hallazgo ${sel.tipo === "manual" ? "manual" : "automático"} · ${fmt(sel.key / FPS)} (frame ${sel.key})`;
   const x = document.createElement("button"); x.textContent = "Quitar selección"; x.onclick = clearSel;
-  el.append(b, x);
+  const del = document.createElement("button"); del.textContent = "Descartar hallazgo"; del.title = "Quita este hallazgo de la lista (se puede restaurar)";
+  del.onclick = () => { const f = findings.find(f => f.key === sel.key && f.tipo === sel.tipo); if (f) discardFinding(f); };
+  el.append(b, x, del);
 }
 // si el médico mueve el video a otro frame, deja de estar «sobre» ese hallazgo
 vid.addEventListener("seeking", () => { if (sel && !vid.srcObject && Math.round(vid.currentTime * FPS) !== sel.key) clearSel(); });
@@ -518,7 +594,7 @@ function renderNotes() {
 }
 
 async function openSource() {
-  marks.clear(); findings = []; notes = []; sel = null; hadDetection = false; lastSent = -1; setSaved("");
+  marks.clear(); findings = []; discarded = []; notes = []; sel = null; hadDetection = false; lastSent = -1; setSaved("");
   sesionTieneVideo = false; sesionVideo = null;
   try {
     const r = await (await api(`/api/findings?paciente=${encodeURIComponent(pid)}&sesion=${encodeURIComponent(sesion)}`)).json();
@@ -529,6 +605,9 @@ async function openSource() {
         c.forma = row.forma || "pincel"; marks.set(row.frame, c);
       }
     }
+    for (const row of r.descartados || [])
+      discarded.push({ key: row.frame, tipo: row.tipo, forma: row.forma || "pincel", src: await blobUrl(row.thumb), mark: null, maskUrl: row.mask });
+    if (r.ventana_descarte) discWin = r.ventana_descarte;
     notes = r.notas; sesionTieneVideo = r.tiene_video; sesionVideo = r.video;
     if (r.hallazgos.length) setSaved(`Se cargaron ${r.hallazgos.length} hallazgo(s) de esta colonoscopia.`);
   } catch { /* colonoscopia nueva o sin historial */ }
@@ -1137,7 +1216,7 @@ function applySession() {
   } else {
     if (ws) ws.close();
     stopCam(); vid.pause(); vid.removeAttribute("src"); vid.load();
-    sesion = ""; pid = ""; findings = []; notes = []; sel = null; marks.clear(); lastFrame = lastProb = null; renderList(); renderNotes(); updateTarget();
+    sesion = ""; pid = ""; findings = []; discarded = []; notes = []; sel = null; marks.clear(); lastFrame = lastProb = null; renderList(); renderNotes(); updateTarget();
     $("pid").value = ""; $("sesinfo").textContent = ""; loadSessions(); if (listening) stopDictado();
     stored = null; $("rvbar").hidden = true; libRows = []; $("libl").innerHTML = ""; showTab("visor");
     syncState.video = null; syncState.srv = null; syncState.videoError = ""; setSync();
