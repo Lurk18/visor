@@ -3,6 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<script>
+  // Raiz del visor: la ruta sin el ultimo tramo (login | visor | biblioteca). Sirve en / y en /projects/colon_viewe/
+  (function () {
+    var b = location.pathname.replace(/(login|visor|biblioteca)\/?$/, "");
+    if (b.slice(-1) !== "/") b += "/";
+    var el = document.createElement("base"); el.href = b;
+    document.head.insertBefore(el, document.head.firstChild);
+  })();
+</script>
 <title>Visor de colonoscopia · UACANet</title>
 <style>
   :root {
@@ -229,7 +238,7 @@ const fmt = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(2).padStart(5, "0")}`
 const blobOf = (c, t) => new Promise(r => c.toBlob(r, t, 0.85));
 
 function connect() {
-  const u = new URL("ws", location.href);            // relativa a la página: sirve en / y en /projects/colon_viewe/
+  const u = new URL("ws", document.baseURI);          // relativa a la raíz del visor (<base>)
   u.protocol = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(u);
   ws.binaryType = "arraybuffer";
@@ -771,7 +780,8 @@ let stored = null;                           // { pid, sesion, src, prepared, re
 let libRows = [];
 const REV = { pendiente: "Pendiente", en_revision: "En revisión", revisada: "Revisada" };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-function showTab(name) {
+function showTab(name, fromRoute) {
+  if (session && !fromRoute) navigate(name);
   $("main").hidden = name !== "visor"; $("library").hidden = name !== "lib";
   $("tab-visor").classList.toggle("on", name === "visor"); $("tab-lib").classList.toggle("on", name === "lib");
   if (name === "lib") loadLibrary(); else fit();
@@ -1198,6 +1208,20 @@ addEventListener("offline", () => { syncState.offline = true; setSync(); });
 addEventListener("beforeunload", e => { if (syncState.video || syncState.pend || (recorder && recorder.state === "recording")) { e.preventDefault(); e.returnValue = ""; } });
 /* ---------- fin sincronización ---------- */
 
+/* ---------- rutas: /login, /visor, /biblioteca ---------- */
+const ROUTE_PATH = { login: "login", visor: "visor", lib: "biblioteca" };
+function routeFromUrl() { const m = location.pathname.match(/(login|visor|biblioteca)\/?$/); return m ? m[1] === "biblioteca" ? "lib" : m[1] : null; }
+function navigate(name, replace) {
+  const target = new URL(ROUTE_PATH[name], document.baseURI).pathname;
+  if (location.pathname === target) return;
+  history[replace ? "replaceState" : "pushState"]({}, "", target);
+}
+addEventListener("popstate", () => {                       // botones atrás/adelante del navegador
+  if (!session) { navigate("login", true); return; }
+  showTab(routeFromUrl() === "lib" ? "lib" : "visor", true);
+});
+/* ---------- fin rutas ---------- */
+
 /* ---------- sesión (Supabase) ---------- */
 let sb = null, session = null, wsAuthed = false, started = false;
 async function token() { const { data } = await sb.auth.getSession(); return data.session ? data.session.access_token : null; }
@@ -1213,12 +1237,14 @@ function applySession() {
     if (!started) { started = true; loop(); }
     if (!ws || ws.readyState > 1) connect();
     drain(); setSync();
+    const r = routeFromUrl();                               // con sesión, /login y la raíz llevan a /visor; /biblioteca se respeta
+    if (r === "lib") showTab("lib", true); else { showTab("visor", true); navigate("visor", true); }
   } else {
     if (ws) ws.close();
     stopCam(); vid.pause(); vid.removeAttribute("src"); vid.load();
     sesion = ""; pid = ""; findings = []; discarded = []; notes = []; sel = null; marks.clear(); lastFrame = lastProb = null; renderList(); renderNotes(); updateTarget();
     $("pid").value = ""; $("sesinfo").textContent = ""; loadSessions(); if (listening) stopDictado();
-    stored = null; $("rvbar").hidden = true; libRows = []; $("libl").innerHTML = ""; showTab("visor");
+    stored = null; $("rvbar").hidden = true; libRows = []; $("libl").innerHTML = ""; showTab("visor", true); navigate("login", true);
     syncState.video = null; syncState.srv = null; syncState.videoError = ""; setSync();
   }
 }

@@ -1011,7 +1011,11 @@ def stream_video(ticket: str, request: Request):
 # --- fin videos guardados ---
 
 
+# El visor es una sola pagina (SPA): el mismo index.html atiende todas estas URL y el JS muestra la vista que corresponde.
 @router.get("/")
+@router.get("/login")
+@router.get("/visor")
+@router.get("/biblioteca")
 def index():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
 
